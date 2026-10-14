@@ -3,9 +3,17 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const { connectDB } = require('./config/database');
+// Fails right away, with instructions, when JWT_SECRET is missing
+require('./config/jwt');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Behind a reverse proxy (Render, Railway, Nginx...), the client address is in X-Forwarded-For:
+// TRUST_PROXY=1 (number of proxies in front of the app) lets the rate limits use it.
+if (process.env.TRUST_PROXY) {
+  app.set('trust proxy', Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
+}
 
 // Middleware
 app.use(cors());
@@ -22,6 +30,7 @@ app.use('/api/shopping', require('./routes/shopping.routes'));
 app.use('/api/schedules', require('./routes/schedule.routes'));
 app.use('/api/calendar', require('./routes/calendar.routes'));
 app.use('/api/trips', require('./routes/trip.routes'));
+app.use('/api/documents', require('./routes/document.routes'));
 
 // Health check
 app.get('/health', (req, res) => {

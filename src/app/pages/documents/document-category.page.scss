@@ -1,0 +1,85 @@
+/* Loading, message, row and button styles come from documents.page.scss */
+
+.category-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.category-header-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  font-size: 22px;
+}
+
+.category-header-hint {
+  font-size: var(--text-sm);
+  color: var(--ion-color-medium-shade);
+}
+
+.filters {
+  display: flex;
+  gap: 8px;
+  margin: 0 -16px 16px;
+  padding: 2px 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--ion-border-color);
+  border-radius: var(--radius-full);
+  background: #FFFFFF;
+  color: var(--ion-text-color);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:has(.chip-avatar) {
+    padding-left: 6px;
+  }
+
+  &.selected {
+    border-color: var(--tile-icon);
+    background: var(--tile-bg);
+  }
+}
+
+.chip-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 700;
+
+  &.household {
+    background: var(--tile-icon);
+    font-size: 13px;
+  }
+}
+
+.documents-list {
+  margin-bottom: 20px;
+}

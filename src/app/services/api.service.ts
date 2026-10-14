@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpHeaders, HttpErrorResponse, HttpParams } from '@angular/common/http';
-import { Observable, throwError, TimeoutError } from 'rxjs';
+import { Observable, firstValueFrom, throwError, TimeoutError } from 'rxjs';
 import { catchError, timeout } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 
@@ -13,6 +13,8 @@ export class ApiService {
   private baseUrl = environment.apiUrl;
   private authToken: string | null = null;
   private requestTimeout = 15000;
+  /** Files can be several MB on a mobile connection */
+  private uploadTimeout = 60000;
 
   constructor(private http: HttpClient) {}
 
@@ -40,15 +42,18 @@ export class ApiService {
       return throwError(() => timeoutError);
     }
 
-    let errorMessage = 'An error occurred';
+    let errorMessage = 'Une erreur est survenue, réessaie';
     let errorData: unknown = null;
 
-    if (error.error instanceof ErrorEvent) {
+    if (error.status === 0) {
+      // Request that never got an answer: offline, server down, blocked...
+      errorMessage = 'Impossible de joindre le serveur. Vérifie ta connexion et réessaie.';
+    } else if (error.error instanceof ErrorEvent) {
       // Client-side error
       errorMessage = error.error.message;
     } else {
-      // Server-side error
-      errorMessage = error.error?.error || error.message;
+      // Server-side error: its own message ({ error: '...' }), already written for the user
+      errorMessage = error.error?.error || errorMessage;
       errorData = error.error;
     }
     
@@ -93,6 +98,22 @@ export class ApiService {
     return this.http.delete<T>(`${this.baseUrl}/${endpoint}`, {
       headers: this.getHeaders()
     }).pipe(timeout(this.requestTimeout), catchError(this.handleError));
+  }
+
+  /** Sends a file as the raw request body, its name URI-encoded in X-File-Name. */
+  putFileAsync<T>(endpoint: string, file: Blob, fileName: string): Promise<T> {
+    return firstValueFrom(this.http.put<T>(`${this.baseUrl}/${endpoint}`, file, {
+      headers: this.getHeaders()
+        .set('Content-Type', file.type || 'application/octet-stream')
+        .set('X-File-Name', encodeURIComponent(fileName))
+    }).pipe(timeout(this.uploadTimeout), catchError(this.handleError)));
+  }
+
+  getBlobAsync(endpoint: string): Promise<Blob> {
+    return firstValueFrom(this.http.get(`${this.baseUrl}/${endpoint}`, {
+      headers: this.getHeaders(),
+      responseType: 'blob'
+    }).pipe(timeout(this.uploadTimeout), catchError(this.handleError)));
   }
 
   // Convert Observable to Promise for easier use in services

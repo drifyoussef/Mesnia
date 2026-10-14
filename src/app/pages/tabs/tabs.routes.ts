@@ -55,6 +55,15 @@ export const routes: Routes = [
         loadComponent: () => import('../trips/trip-detail.page').then(m => m.TripDetailPage)
       },
       {
+        path: 'documents',
+        loadComponent: () => import('../documents/documents.page').then(m => m.DocumentsPage)
+      },
+      {
+        // Same tab stack as the list: back from a category returns to it
+        path: 'documents/:category',
+        loadComponent: () => import('../documents/document-category.page').then(m => m.DocumentCategoryPage)
+      },
+      {
         path: 'schedules',
         loadComponent: () => import('../schedules/schedules.page').then(m => m.SchedulesPage)
       },

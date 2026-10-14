@@ -20,6 +20,8 @@ interface BackendHousehold {
   name: string;
   createdBy: string;
   inviteCode: string;
+  /** The backend replaces the code every day */
+  inviteCodeExpiresAt?: string | Date;
   members: BackendHouseholdMember[];
   createdAt: string | Date;
   updatedAt: string | Date;
@@ -115,6 +117,17 @@ export class HouseholdService {
     if (householdId) {
       this.pendingLoad = this.loadHouseholdById(householdId);
       await this.pendingLoad;
+    }
+  }
+
+  /**
+   * Le code ami change chaque jour : s'il a expiré depuis le dernier chargement (app restée
+   * ouverte), on recharge le foyer, et le backend renvoie le nouveau code.
+   */
+  async refreshInviteCodeIfExpired(): Promise<void> {
+    const expiry = this.currentHouseholdSubject.value?.inviteLinkExpiry;
+    if (expiry && expiry.getTime() <= Date.now()) {
+      await this.reload();
     }
   }
 
@@ -258,6 +271,7 @@ export class HouseholdService {
       updatedAt: new Date(h.updatedAt),
       inviteCode,
       inviteLink: this.buildInviteLink(inviteCode),
+      inviteLinkExpiry: h.inviteCodeExpiresAt ? new Date(h.inviteCodeExpiresAt) : undefined,
       members: (Array.isArray(h.members) ? h.members : []).map(m => this.normalizeMember(m))
     };
   }

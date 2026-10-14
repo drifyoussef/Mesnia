@@ -1,0 +1,135 @@
+<ion-header [translucent]="true" class="ion-no-border">
+  <ion-toolbar>
+    <ion-buttons slot="start">
+      <ion-back-button defaultHref="/tabs/home" text=""></ion-back-button>
+    </ion-buttons>
+    <ion-title>Documents</ion-title>
+    @if (state === 'ready') {
+      <ion-buttons slot="end">
+        <ion-button fill="clear" (click)="addDocument()" aria-label="Ajouter un document">
+          <ion-icon slot="icon-only" name="add" color="primary"></ion-icon>
+        </ion-button>
+      </ion-buttons>
+    }
+  </ion-toolbar>
+</ion-header>
+
+<ion-content [fullscreen]="true" class="ion-padding">
+  @switch (state) {
+    @case ('loading') {
+      <div class="documents-loading"><ion-spinner name="crescent"></ion-spinner></div>
+    }
+
+    @case ('error') {
+      <div class="empty-state documents-message">
+        <ion-icon name="cloud-offline-outline"></ion-icon>
+        <span>Impossible de charger les documents. Vérifie ta connexion et réessaie.</span>
+      </div>
+      <div class="settings-card">
+        <button class="settings-row" (click)="load()">
+          <span class="settings-row-icon"><ion-icon name="refresh-outline"></ion-icon></span>
+          <span class="settings-row-label">Réessayer</span>
+          <ion-icon class="settings-row-chevron" name="chevron-forward"></ion-icon>
+        </button>
+      </div>
+    }
+
+    @case ('no-household') {
+      <div class="empty-state documents-message">
+        <ion-icon name="home-outline"></ion-icon>
+        <span>Rejoins ou crée un foyer pour ranger vos documents au même endroit.</span>
+      </div>
+      <div class="settings-card">
+        <button class="settings-row" routerLink="/tabs/settings/household">
+          <span class="settings-row-icon"><ion-icon name="home-outline"></ion-icon></span>
+          <span class="settings-row-label">Mon foyer</span>
+          <ion-icon class="settings-row-chevron" name="chevron-forward"></ion-icon>
+        </button>
+      </div>
+    }
+
+    @case ('ready') {
+      <label class="search">
+        <ion-icon name="search"></ion-icon>
+        <input type="search" [(ngModel)]="query" placeholder="Rechercher un document" aria-label="Rechercher un document" />
+        @if (query) {
+          <button class="search-clear" (click)="query = ''" aria-label="Effacer la recherche">
+            <ion-icon name="close-circle"></ion-icon>
+          </button>
+        }
+      </label>
+
+      @if (query.trim()) {
+        <section class="settings-section">
+          <h2 class="settings-section-title">Résultats</h2>
+          @if (searchResults.length === 0) {
+            <div class="empty-state">
+              <ion-icon name="search"></ion-icon>
+              <span>Aucun document ne correspond à « {{ query.trim() }} ».</span>
+            </div>
+          } @else {
+            <div class="settings-card">
+              @for (doc of searchResults; track doc.id) {
+                <button class="settings-row" (click)="openDocument(doc)">
+                  <app-document-row class="row-content" [document]="doc" [members]="members"></app-document-row>
+                </button>
+              }
+            </div>
+          }
+        </section>
+      } @else {
+        @if (toRenew.length > 0) {
+          <section class="settings-section">
+            <h2 class="settings-section-title">À renouveler</h2>
+            <div class="settings-card">
+              @for (doc of toRenew; track doc.id) {
+                <button class="settings-row" (click)="openDocument(doc)">
+                  <app-document-row class="row-content" [document]="doc" [members]="members"></app-document-row>
+                </button>
+              }
+            </div>
+          </section>
+        }
+
+        <section class="settings-section">
+          <h2 class="settings-section-title">Catégories</h2>
+          <div class="category-grid">
+            @for (category of categories; track category.value) {
+              <button class="category-tile" [class.empty]="count(category) === 0" (click)="openCategory(category)">
+                <span class="category-icon" [style.background]="tint(category)" [style.color]="category.color">
+                  <ion-icon [name]="category.icon"></ion-icon>
+                </span>
+                <span class="category-label">{{ category.label }}</span>
+                <span class="category-count">
+                  @switch (count(category)) {
+                    @case (0) { Vide }
+                    @case (1) { 1 document }
+                    @default { {{ count(category) }} documents }
+                  }
+                </span>
+              </button>
+            }
+          </div>
+        </section>
+
+        <button class="primary-btn" (click)="addDocument()">
+          <ion-icon name="add"></ion-icon>
+          <span>Ajouter un document</span>
+        </button>
+
+        @if (recent.length > 0) {
+          <section class="settings-section">
+            <h2 class="settings-section-title">Ajoutés récemment</h2>
+            <div class="settings-card">
+              @for (doc of recent; track doc.id) {
+                <button class="settings-row" (click)="openDocument(doc)">
+                  <app-document-row class="row-content" [document]="doc" [members]="members"></app-document-row>
+                </button>
+              }
+            </div>
+          </section>
+        }
+      }
+    }
+  }
+</ion-content>

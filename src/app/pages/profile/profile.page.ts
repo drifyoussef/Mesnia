@@ -76,6 +76,19 @@ export class ProfilePage implements OnInit, OnDestroy {
     );
   }
 
+  /** The invite code changes every day: never show an expired one */
+  ionViewWillEnter() {
+    this.householdService.refreshInviteCodeIfExpired();
+  }
+
+  /** "18 h", "moins d'une heure": until the backend replaces the code */
+  get inviteExpiryLabel(): string {
+    const expiry = this.household?.inviteLinkExpiry;
+    if (!expiry) return '';
+    const hours = Math.floor((expiry.getTime() - Date.now()) / 3600000);
+    return hours >= 1 ? `${hours} h` : "moins d'une heure";
+  }
+
   retryLoad() {
     this.householdService.reload();
   }
@@ -135,7 +148,7 @@ export class ProfilePage implements OnInit, OnDestroy {
         }
       } catch (error) {
         console.error('Error joining household:', error);
-        this.toastService.error('Code ami invalide');
+        this.toastService.error(this.joinErrorMessage(error));
       }
     }
   }
@@ -156,7 +169,7 @@ export class ProfilePage implements OnInit, OnDestroy {
       }
     } catch (error) {
       console.error('Error joining household via link:', error);
-      this.toastService.error("Lien d'invitation invalide ou expiré");
+      this.toastService.error(this.joinErrorMessage(error));
     }
   }
 
@@ -181,7 +194,16 @@ export class ProfilePage implements OnInit, OnDestroy {
     }
   }
 
-  copyToClipboard(text: string, type: 'link' | 'code') {
+  /** The backend explains why (code changed, too many attempts...); otherwise a generic message */
+  private joinErrorMessage(error: unknown): string {
+    const status = (error as { statusCode?: number }).statusCode || 0;
+    return status >= 400 && status < 500 ? (error as Error).message : 'Impossible de rejoindre le foyer, réessaie';
+  }
+
+  async copyToClipboard(type: 'link' | 'code') {
+    // Copied right after a refresh if the code expired while the page was open
+    await this.householdService.refreshInviteCodeIfExpired();
+    const text = type === 'link' ? this.inviteLink : this.inviteCode;
     navigator.clipboard.writeText(text).then(() => {
       if (type === 'link') {
         this.copiedLink = true;
@@ -193,10 +215,12 @@ export class ProfilePage implements OnInit, OnDestroy {
     }).catch(() => this.toastService.error('Impossible de copier'));
   }
 
-  shareLink() {
+  async shareLink() {
+    await this.householdService.refreshInviteCodeIfExpired();
+
     // No share sheet (desktop browsers): copying is the next best thing
     if (!navigator.share) {
-      this.copyToClipboard(this.inviteLink, 'link');
+      await this.copyToClipboard('link');
       this.toastService.success('Lien copié');
       return;
     }
@@ -244,10 +268,10 @@ export class ProfilePage implements OnInit, OnDestroy {
     const deletesHousehold = this.household.createdBy === this.currentUserId || this.members.length === 1;
     const others = this.members.length - 1;
     const message = !deletesHousehold
-      ? "Tu n'auras plus accès aux tâches, courses et au calendrier du foyer."
+      ? "Tu n'auras plus accès aux tâches, courses, calendrier et documents du foyer. Tes documents privés seront supprimés."
       : others > 0
-        ? `Tu as créé ce foyer : le quitter le supprimera définitivement pour les ${others} autre${others > 1 ? 's' : ''} membre${others > 1 ? 's' : ''}.`
-        : 'Tu es le seul membre : le foyer sera supprimé définitivement.';
+        ? `Tu as créé ce foyer : le quitter le supprimera définitivement, avec tous ses documents, pour les ${others} autre${others > 1 ? 's' : ''} membre${others > 1 ? 's' : ''}.`
+        : 'Tu es le seul membre : le foyer et tous ses documents seront supprimés définitivement.';
 
     const confirmed = await this.confirm(
       deletesHousehold ? 'Supprimer le foyer ?' : 'Quitter le foyer ?',
@@ -492,7 +516,7 @@ export class CreateHouseholdModalComponent {
         type="text"
         [(ngModel)]="value"
         (keyup.enter)="join()"
-        placeholder="Ex : MZ7W7X"
+        placeholder="Ex : MZ7W7XQ4"
         autocapitalize="characters"
         aria-label="Code ami ou lien d'invitation"
       />

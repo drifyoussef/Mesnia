@@ -11,7 +11,7 @@ const connectDB = async () => {
     }
 
     const uri = process.env.MONGODB_URI;
-    const dbName = process.env.DB_NAME || 'wevy';
+    const dbName = process.env.DB_NAME || 'Mesnia';
 
     console.log('🔌 Connecting to MongoDB Atlas...');
     
@@ -61,6 +61,12 @@ const createIndexes = async (database) => {
 
     // Trips
     await database.collection('trips').createIndex({ householdId: 1, startDate: 1 });
+
+    // Password reset requests: MongoDB deletes each one once its expiresAt has passed
+    await database.collection('password_resets').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+    // Documents (files themselves are in the GridFS bucket "document_files")
+    await database.collection('documents').createIndex({ householdId: 1, createdAt: -1 });
     
     console.log('✅ Database indexes created');
   } catch (error) {

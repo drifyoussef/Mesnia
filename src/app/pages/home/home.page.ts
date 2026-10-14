@@ -5,7 +5,7 @@ import {
   IonHeader, IonToolbar, IonTitle, IonContent, IonIcon, IonButtons, IonButton, ModalController
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
-import { checkmarkDone, cart, restaurant, sparkles, home, addCircle, calendar, time, airplane, settings, add, close } from 'ionicons/icons';
+import { checkmarkDone, cart, restaurant, sparkles, home, addCircle, calendar, time, airplane, folderOpen, settings, add, close } from 'ionicons/icons';
 import { TaskService } from '../../services/task.service';
 import { ShoppingListService } from '../../services/shopping-list.service';
 import { CalendarService } from '../../services/calendar.service';
@@ -57,6 +57,7 @@ export class HomePage implements OnInit, OnDestroy {
     { label: 'Calendrier', icon: 'calendar', route: '/tabs/calendar' },
     { label: 'Horaires', icon: 'time', route: '/tabs/schedules' },
     { label: 'Voyage', icon: 'airplane', route: '/tabs/trips' },
+    { label: 'Documents', icon: 'folder-open', route: '/tabs/documents' },
     { label: 'Mon foyer', icon: 'home', route: '/tabs/settings/household' },
   ];
 
@@ -69,7 +70,7 @@ export class HomePage implements OnInit, OnDestroy {
     private modalController: ModalController,
     private cdr: ChangeDetectorRef
   ) {
-    addIcons({ checkmarkDone, cart, restaurant, sparkles, home, addCircle, calendar, time, airplane, settings, add, close });
+    addIcons({ checkmarkDone, cart, restaurant, sparkles, home, addCircle, calendar, time, airplane, folderOpen, settings, add, close });
     this.appTiles = HomePage.TILE_DEFS.map(tile => ({ ...tile }));
     this.todayLabel = this.formatToday();
     this.homeWidgets = this.loadHomeWidgets();

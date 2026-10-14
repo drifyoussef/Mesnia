@@ -26,7 +26,8 @@ export class ToastService {
   async error(message: string) {
     const toast = await this.toastController.create({
       message,
-      duration: 2800,
+      // Long explanations (e.g. "the codes change every day...") need time to be read
+      duration: Math.min(8000, Math.max(2800, message.length * 55)),
       position: 'bottom',
       color: 'danger',
       icon: 'alert-circle-outline',

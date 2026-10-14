@@ -1,0 +1,84 @@
+<ion-header [translucent]="true" class="ion-no-border">
+  <ion-toolbar>
+    <ion-buttons slot="start">
+      <ion-back-button defaultHref="/tabs/documents" text=""></ion-back-button>
+    </ion-buttons>
+    <ion-title>{{ category.label }}</ion-title>
+    @if (state === 'ready') {
+      <ion-buttons slot="end">
+        <ion-button fill="clear" (click)="addDocument()" aria-label="Ajouter un document">
+          <ion-icon slot="icon-only" name="add" color="primary"></ion-icon>
+        </ion-button>
+      </ion-buttons>
+    }
+  </ion-toolbar>
+</ion-header>
+
+<ion-content [fullscreen]="true" class="ion-padding">
+  <div class="category-header">
+    <span class="category-header-icon" [style.background]="tint" [style.color]="category.color">
+      <ion-icon [name]="category.icon"></ion-icon>
+    </span>
+    <span class="category-header-hint">{{ category.hint }}</span>
+  </div>
+
+  @switch (state) {
+    @case ('loading') {
+      <div class="documents-loading"><ion-spinner name="crescent"></ion-spinner></div>
+    }
+
+    @case ('error') {
+      <div class="empty-state documents-message">
+        <ion-icon name="cloud-offline-outline"></ion-icon>
+        <span>Impossible de charger les documents. Vérifie ta connexion et réessaie.</span>
+      </div>
+      <div class="settings-card">
+        <button class="settings-row" (click)="load()">
+          <span class="settings-row-icon"><ion-icon name="refresh-outline"></ion-icon></span>
+          <span class="settings-row-label">Réessayer</span>
+          <ion-icon class="settings-row-chevron" name="chevron-forward"></ion-icon>
+        </button>
+      </div>
+    }
+
+    @case ('ready') {
+      @if (documents.length === 0) {
+        <div class="empty-state documents-message">
+          <ion-icon [name]="category.icon"></ion-icon>
+          <span>Aucun document ici pour l'instant. Photographie-le ou importe un PDF pour l'avoir toujours sous la main.</span>
+        </div>
+      } @else {
+        @if (concernedMembers.length > 0 && (concernedMembers.length > 1 || hasHouseholdDocuments)) {
+          <div class="filters">
+            <button class="chip" [class.selected]="filter === ''" (click)="filter = ''">Tous</button>
+            @if (hasHouseholdDocuments) {
+              <button class="chip" [class.selected]="filter === 'household'" (click)="filter = 'household'">
+                <span class="chip-avatar household"><ion-icon name="home"></ion-icon></span>
+                Foyer
+              </button>
+            }
+            @for (member of concernedMembers; track member.userId) {
+              <button class="chip" [class.selected]="filter === member.userId" (click)="filter = member.userId">
+                <span class="chip-avatar" [style.background]="color(member.displayName)">{{ initial(member.displayName) }}</span>
+                {{ member.displayName }}
+              </button>
+            }
+          </div>
+        }
+
+        <div class="settings-card documents-list">
+          @for (doc of filtered; track doc.id) {
+            <button class="settings-row" (click)="openDocument(doc)">
+              <app-document-row class="row-content" [document]="doc" [members]="members" [showCategory]="false"></app-document-row>
+            </button>
+          }
+        </div>
+      }
+
+      <button class="primary-btn" (click)="addDocument()">
+        <ion-icon name="add"></ion-icon>
+        <span>Ajouter un document</span>
+      </button>
+    }
+  }
+</ion-content>

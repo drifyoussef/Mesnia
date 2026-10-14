@@ -3,9 +3,35 @@ const router = express.Router();
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
 const { authenticateUser } = require('../middleware/auth.middleware');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const { JWT_SECRET, JWT_OPTIONS } = require('../config/jwt');
+const { asString } = require('../utils/input');
+const { loginLimiter, registerLimiter, passwordResetLimiter } = require('../middleware/rate-limit.middleware');
+
+const MIN_PASSWORD_LENGTH = 6;
+/** Shown to the user: the technical details stay in the server log */
+const SERVER_ERROR = 'Erreur du serveur, réessaie dans un instant';
+/** Wrong codes allowed for one reset request: then a new code must be asked for */
+const MAX_RESET_ATTEMPTS = 5;
+
+const signToken = user => jwt.sign({ userId: user._id.toString(), email: user.email }, JWT_SECRET, JWT_OPTIONS);
+
+/**
+ * Reset codes are stored as an HMAC, never in clear: reading the database is not enough to
+ * reset an account. A plain hash would not do: a 6-digit code has only 900 000 values, all
+ * hashed in a split second. Keyed with the server secret, the HMAC reveals nothing without it.
+ */
+const hashResetCode = code => crypto.createHmac('sha256', JWT_SECRET).update(`password-reset:${code}`).digest('hex');
+
+function resetCodeMatches(code, storedHash) {
+  if (typeof storedHash !== 'string') return false; // record from before hashing: no longer valid
+  const expected = Buffer.from(storedHash, 'hex');
+  const actual = Buffer.from(hashResetCode(code), 'hex');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -15,8 +41,11 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+/** "jean.dupont@gmail.com" -> "je***@gmail.com": enough to tell requests apart in the logs */
+const maskEmail = email => email.replace(/^([^@]{1,2})[^@]*(@.*)?$/, (_, start, domain) => `${start}***${domain || ''}`);
+
 async function sendResetEmail(to, code) {
-  await transporter.sendMail({
+  return transporter.sendMail({
     from: `"Mesnia" <${process.env.GMAIL_USER}>`,
     to,
     subject: 'Réinitialisation de votre mot de passe Mesnia',
@@ -34,15 +63,23 @@ async function sendResetEmail(to, code) {
 }
 
 // Register new user
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
   try {
-    const { email, password, displayName } = req.body;
+    const email = asString(req.body?.email, 254).trim();
+    const password = asString(req.body?.password, 200);
+    const displayName = asString(req.body?.displayName, 60).trim();
+    if (!email || !password || !displayName) {
+      return res.status(400).json({ error: 'Remplis ton prénom, ton email et ton mot de passe' });
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères' });
+    }
     const db = getDB();
-    
+
     // Check if user already exists
     const existingUser = await db.collection('users').findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ error: 'Email already in use' });
+      return res.status(400).json({ error: 'Un compte existe déjà avec cet email' });
     }
     
     // Hash password
@@ -63,13 +100,8 @@ router.post('/register', async (req, res) => {
     const result = await db.collection('users').insertOne(user);
     user._id = result.insertedId;
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user._id.toString(), email: user.email },
-      process.env.JWT_SECRET || 'wevy_secret',
-      { expiresIn: '30d' }
-    );
-    
+    const token = signToken(user);
+
     // Remove password from response and map _id to id
     delete user.password;
     const userResponse = {
@@ -82,34 +114,33 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ user: userResponse, token });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
 // Login user
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = asString(req.body?.email, 254).trim();
+    const password = asString(req.body?.password, 200);
+    if (!email || !password) {
+      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+    }
     const db = getDB();
-    
+
     // Find user
     const user = await db.collection('users').findOne({ email });
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
-    
+
     // Check password
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
-    
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user._id.toString(), email: user.email },
-      process.env.JWT_SECRET || 'wevy_secret',
-      { expiresIn: '30d' }
-    );
+
+    const token = signToken(user);
     
     // Remove password from response and map _id to id
     delete user.password;
@@ -123,7 +154,7 @@ router.post('/login', async (req, res) => {
     res.json({ user: userResponse, token });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
@@ -137,7 +168,7 @@ router.get('/me', authenticateUser, async (req, res) => {
     );
     
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Compte introuvable' });
     }
     
     // Map _id to id
@@ -151,14 +182,16 @@ router.get('/me', authenticateUser, async (req, res) => {
     res.json({ user: userResponse });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
 // Update user profile
 router.put('/profile', authenticateUser, async (req, res) => {
   try {
-    const { displayName, avatar } = req.body;
+    const displayName = asString(req.body?.displayName, 60).trim();
+    // Inline picture (data URL), hence the large cap
+    const avatar = asString(req.body?.avatar, 1024 * 1024);
     const db = getDB();
     
     const updateData = {
@@ -185,35 +218,36 @@ router.put('/profile', authenticateUser, async (req, res) => {
     res.json({ user: userResponse });
   } catch (error) {
     console.error('Update profile error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
 // Change password
 router.post('/change-password', authenticateUser, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const currentPassword = asString(req.body?.currentPassword, 200);
+    const newPassword = asString(req.body?.newPassword, 200);
     const db = getDB();
-    
+
     // Validate input
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Current password and new password are required' });
+      return res.status(400).json({ error: 'Entre ton mot de passe actuel et le nouveau' });
     }
-    
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères' });
     }
     
     // Find user
     const user = await db.collection('users').findOne({ _id: new ObjectId(req.user.uid) });
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Compte introuvable' });
     }
     
     // Verify current password
     const isValidPassword = await bcrypt.compare(currentPassword, user.password);
     if (!isValidPassword) {
-      return res.status(401).json({ error: 'Current password is incorrect' });
+      return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
     }
     
     // Hash new password
@@ -237,137 +271,115 @@ router.post('/change-password', authenticateUser, async (req, res) => {
     res.json({ message: 'Password changed successfully', user: userResponse });
   } catch (error) {
     console.error('Change password error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
 // Request password reset
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
   try {
-    const { email } = req.body;
-    console.log('[forgot-password] Request received for email:', email);
-    
-    const db = getDB();
-    
-    // Validate input
+    const email = asString(req.body?.email, 254).trim();
     if (!email) {
-      console.log('[forgot-password] Email not provided');
-      return res.status(400).json({ error: 'Email is required' });
+      return res.status(400).json({ error: 'Entre ton email' });
     }
-    
-    // Find user
-    console.log('[forgot-password] Checking if user exists...');
+
+    const db = getDB();
     const user = await db.collection('users').findOne({ email });
     if (!user) {
-      // For security, don't reveal if email exists
-      console.log('[forgot-password] User not found, returning generic response:', email);
+      // For security, don't reveal if email exists (to the client: the server log says it)
+      console.info(`[forgot-password] No account for ${maskEmail(email)}: no email sent`);
       return res.status(200).json({ message: 'If the email exists, a reset code has been sent' });
     }
-    
-    console.log('[forgot-password] User found, generating reset code...');
-    
-    // Generate reset code (6 digits)
-    const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log('[forgot-password] Generated reset code:', resetCode, 'for email:', email);
-    
-    // Store reset code with expiration (15 minutes)
+
+    // 6 digits from a cryptographic source. Never logged: whoever reads the logs could reset the account.
+    const resetCode = crypto.randomInt(100000, 1000000).toString();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    console.log('[forgot-password] Storing reset code, expires at:', expiresAt);
-    
+
     await db.collection('password_resets').updateOne(
       { email },
       {
         $set: {
           email,
-          code: resetCode,
+          codeHash: hashResetCode(resetCode),
+          attempts: 0,
           expiresAt,
           createdAt: new Date()
-        }
+        },
+        // Code of an earlier request, stored in clear before hashing
+        $unset: { code: '' }
       },
       { upsert: true }
     );
-    
-    console.log(`\n🔐 PASSWORD RESET CODE FOR ${email}: ${resetCode}\n`);
-    console.log('[forgot-password] Reset code stored, sending email...');
 
-    await sendResetEmail(email, resetCode);
-    console.log('[forgot-password] Email sent successfully');
+    const info = await sendResetEmail(email, resetCode);
+    console.info(`[forgot-password] Reset code emailed to ${maskEmail(email)} (accepted: ${info.accepted.length}, rejected: ${info.rejected.length}, id: ${info.messageId})`);
 
     res.json({ message: 'Reset code sent to your email' });
   } catch (error) {
     console.error('[forgot-password] Error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
 // Verify reset code and reset password
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', passwordResetLimiter, async (req, res) => {
   try {
-    const { email, code, newPassword } = req.body;
-    console.log(`[reset-password] Request received for email: ${email}`);
-    
-    const db = getDB();
-    
+    const email = asString(req.body?.email, 254).trim();
+    const code = asString(req.body?.code, 12).trim();
+    const newPassword = asString(req.body?.newPassword, 200);
+
     // Validate input
     if (!email || !code || !newPassword) {
-      console.log('[reset-password] Validation failed: missing fields');
-      return res.status(400).json({ error: 'Email, code, and new password are required' });
+      return res.status(400).json({ error: 'Entre le code reçu par email et ton nouveau mot de passe' });
     }
-    
-    if (newPassword.length < 6) {
-      console.log('[reset-password] Validation failed: password too short');
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères' });
     }
-    
-    // Find and verify reset code
-    console.log('[reset-password] Looking for password reset record...');
+
+    const db = getDB();
     const resetRecord = await db.collection('password_resets').findOne({ email });
     if (!resetRecord) {
-      console.log('[reset-password] No reset record found for email:', email);
-      return res.status(400).json({ error: 'No password reset request found' });
+      return res.status(400).json({ error: 'Aucune demande en cours pour cet email : demande un nouveau code' });
     }
-    
-    console.log('[reset-password] Reset record found, verifying code...');
-    if (resetRecord.code !== code) {
-      console.log('[reset-password] Invalid code. Expected:', resetRecord.code, 'Received:', code);
-      return res.status(400).json({ error: 'Invalid reset code' });
-    }
-    
+
     if (new Date() > resetRecord.expiresAt) {
-      console.log('[reset-password] Reset code expired');
-      return res.status(400).json({ error: 'Reset code has expired' });
+      await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
+      return res.status(400).json({ error: 'Ce code a expiré (il est valable 15 minutes) : demande un nouveau code' });
     }
-    
-    // Find user
-    console.log('[reset-password] Finding user with email:', email);
+
+    if (!resetCodeMatches(code, resetRecord.codeHash)) {
+      // A code can only be guessed a few times: after that, a new one must be requested
+      const attempts = (resetRecord.attempts || 0) + 1;
+      if (attempts >= MAX_RESET_ATTEMPTS) {
+        await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
+        return res.status(400).json({ error: 'Trop de codes incorrects : ce code est annulé, demande un nouveau code' });
+      }
+      await db.collection('password_resets').updateOne({ _id: resetRecord._id }, { $set: { attempts } });
+      const left = MAX_RESET_ATTEMPTS - attempts;
+      return res.status(400).json({ error: `Code incorrect : encore ${left} essai${left > 1 ? 's' : ''}` });
+    }
+
+    // Single use: consumed before the password changes
+    await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
+
     const user = await db.collection('users').findOne({ email });
     if (!user) {
-      console.log('[reset-password] User not found:', email);
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Compte introuvable' });
     }
-    
-    // Hash new password
-    console.log('[reset-password] Hashing new password...');
+
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-    
-    // Update password
-    console.log('[reset-password] Updating password in database...');
+
+    // By id: the account whose reset code was checked, and no other
     const result = await db.collection('users').findOneAndUpdate(
-      { email },
+      { _id: user._id },
       { $set: { password: hashedPassword, updatedAt: new Date() } },
       { returnDocument: 'after', projection: { password: 0 } }
     );
 
     if (!result) {
-      console.log('[reset-password] Failed to update password - no result returned');
-      return res.status(404).json({ error: 'Failed to update password' });
+      return res.status(404).json({ error: 'Impossible de changer le mot de passe, réessaie' });
     }
-
-    console.log('[reset-password] Password updated successfully');
-
-    // Delete reset code
-    console.log('[reset-password] Deleting reset code...');
-    await db.collection('password_resets').deleteOne({ email });
 
     // Map _id to id
     const userResponse = {
@@ -376,12 +388,11 @@ router.post('/reset-password', async (req, res) => {
       householdId: result.householdId ? result.householdId.toString() : null
     };
     delete userResponse._id;
-    
-    console.log('[reset-password] Sending success response');
+
     res.json({ message: 'Password reset successfully', user: userResponse });
   } catch (error) {
     console.error('[reset-password] Error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: SERVER_ERROR });
   }
 });
 
