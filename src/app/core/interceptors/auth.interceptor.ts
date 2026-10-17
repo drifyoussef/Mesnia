@@ -6,17 +6,17 @@ import {
   HttpInterceptor
 } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { environment } from '../../../environments/environment';
+import { TokenStorageService } from '../token-storage.service';
 
+/** Adds the session token to every call to the Mesnia API (and only to it). */
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
-  constructor() {}
+  constructor(private tokenStorage: TokenStorageService) {}
 
   intercept(request: HttpRequest<unknown>, next: HttpHandler): Observable<HttpEvent<unknown>> {
-    // Get token from local storage
-    const token = localStorage.getItem('wevy_auth_token');
-
-    // Clone the request and add authorization header if token exists
-    if (token) {
+    const token = this.tokenStorage.token;
+    if (token && request.url.startsWith(environment.apiUrl)) {
       request = request.clone({
         setHeaders: {
           Authorization: `Bearer ${token}`

@@ -126,3 +126,42 @@
     transform: scale(0.9);
   }
 }
+
+.task-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  ion-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  &.late {
+    color: var(--ion-color-danger);
+    font-weight: 600;
+  }
+}
+
+.task-edit-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--gray-400);
+  padding: 0;
+  cursor: pointer;
+
+  ion-icon {
+    font-size: 18px;
+  }
+
+  &:active {
+    background: var(--gray-50);
+  }
+}

@@ -1,10 +1,11 @@
 export interface User {
   id: string;
   email: string;
+  emailVerified?: boolean;
   displayName: string;
+  avatar?: string;
   avatarUrl?: string;
   householdId?: string;
-  role?: 'admin' | 'member';
   createdAt: Date;
   updatedAt: Date;
   preferences?: UserPreferences;

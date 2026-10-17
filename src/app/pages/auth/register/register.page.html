@@ -51,6 +51,7 @@
             class="password-toggle"
           ></ion-icon>
         </div>
+        <p class="field-hint">{{ minPasswordLength }} caractères minimum</p>
       </div>
 
       <div class="form-field">
@@ -76,6 +77,12 @@
           <p class="error-message">{{ error }}</p>
         </ion-text>
       }
+
+      <p class="legal-consent">
+        En créant un compte, tu acceptes les
+        <a [href]="termsUrl" target="_blank" rel="noopener">conditions d'utilisation</a>
+        et la <a [href]="privacyUrl" target="_blank" rel="noopener">politique de confidentialité</a>.
+      </p>
 
       <ion-button
         expand="block"

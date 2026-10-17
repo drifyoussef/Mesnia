@@ -11,32 +11,23 @@ type HttpParamsType = HttpParams | Record<string, string | number | boolean | re
 })
 export class ApiService {
   private baseUrl = environment.apiUrl;
-  private authToken: string | null = null;
-  private requestTimeout = 15000;
+  /** Render's free plan puts the server to sleep: the first request can take up to a minute */
+  private requestTimeout = 60000;
   /** Files can be several MB on a mobile connection */
   private uploadTimeout = 60000;
 
   constructor(private http: HttpClient) {}
 
-  setAuthToken(token: string | null) {
-    this.authToken = token;
-  }
-
+  /** The session token is added by AuthInterceptor */
   private getHeaders(): HttpHeaders {
-    let headers = new HttpHeaders({
+    return new HttpHeaders({
       'Content-Type': 'application/json'
     });
-
-    if (this.authToken) {
-      headers = headers.set('Authorization', `Bearer ${this.authToken}`);
-    }
-
-    return headers;
   }
 
   private handleError(error: HttpErrorResponse | TimeoutError) {
     if (error instanceof TimeoutError) {
-      const timeoutError = new Error('La requête a expiré. Vérifiez que le serveur backend est démarré.') as any;
+      const timeoutError = new Error('Le serveur met du temps à répondre. Vérifie ta connexion et réessaie.') as any;
       timeoutError.statusCode = 0;
       console.error('API Timeout:', error);
       return throwError(() => timeoutError);
@@ -75,7 +66,7 @@ export class ApiService {
     }).pipe(timeout(this.requestTimeout), catchError(this.handleError));
   }
 
-  /** `timeoutMs` overrides the default 15 s for slow calls (e.g. AI recipe import). */
+  /** `timeoutMs` overrides the default timeout for slow calls (e.g. AI recipe import). */
   post<T>(endpoint: string, data: unknown, timeoutMs = this.requestTimeout): Observable<T> {
     return this.http.post<T>(`${this.baseUrl}/${endpoint}`, data, {
       headers: this.getHeaders()

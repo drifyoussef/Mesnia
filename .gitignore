@@ -50,3 +50,6 @@ Thumbs.db
 # Capacitor
 /android
 /ios
+
+# Notes privées (audit) : jamais versionnées
+/AUDIT.md

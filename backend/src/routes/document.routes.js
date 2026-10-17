@@ -3,12 +3,15 @@ const router = express.Router();
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
 const { authenticateUser } = require('../middleware/auth.middleware');
-const { bucket, deleteFile } = require('../services/documents');
+const { requireHouseholdMember } = require('../middleware/household.middleware');
+const { storeFile, loadFile, deleteFile, householdStorage } = require('../services/documents');
+const { handle } = require('../utils/handle');
 
 // Household documents (ordonnances, attestations CAF, avis d'impôt...), sorted by category.
-// The metadata lives in "documents", the file itself in the GridFS bucket "document_files":
+// The metadata lives in "documents", the file itself (encrypted) in the GridFS bucket "document_files":
 // { householdId, title, category, memberId?, documentDate?, expiresAt?, notes, private,
-//   file?: { id: ObjectId, name, mimeType, size, uploadedAt },
+//   file?: { id: ObjectId, name, mimeType, size, uploadedAt, encrypted },
+//   reminders?: { 30?: Date, 7?: Date, 0?: Date },   // expiry reminders already sent
 //   createdBy, createdAt, updatedAt }
 // A private document is only visible to the member who added it. Any member can edit a shared
 // document, but only its author or an admin of the household can delete it or replace its file.
@@ -18,34 +21,10 @@ const CATEGORIES = [
   'sante', 'caf', 'impots', 'logement', 'identite', 'banque', 'assurance', 'travail', 'vehicule', 'ecole', 'autre'
 ];
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const HOUSEHOLD_QUOTA_BYTES = 500 * 1024 * 1024;
 
 router.use(authenticateUser);
-
-// Only members of the household in the URL get in (same rule as trips / calendar / schedules)
-router.use('/:householdId', async (req, res, next) => {
-  try {
-    if (!ObjectId.isValid(req.params.householdId)) {
-      return res.status(400).json({ error: 'Invalid household id' });
-    }
-
-    const householdId = new ObjectId(req.params.householdId);
-    const [user, household] = await Promise.all([
-      getDB().collection('users').findOne({ _id: new ObjectId(req.user.uid) }),
-      getDB().collection('households').findOne({ _id: householdId })
-    ]);
-    if (!user || !household || user.householdId?.toString() !== req.params.householdId) {
-      return res.status(403).json({ error: 'Access to this household is not allowed' });
-    }
-
-    req.householdId = householdId;
-    req.memberIds = (household.members || []).map(member => member.userId);
-    req.isAdmin = (household.members || []).some(member => member.userId === req.user.uid && member.role === 'admin');
-    next();
-  } catch (error) {
-    console.error('Household authorization error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+router.use('/:householdId', requireHouseholdMember);
 
 // ---------- Helpers ----------
 
@@ -61,7 +40,7 @@ function visibleTo(req) {
 }
 
 function toClient(doc) {
-  const { _id, householdId, file, ...rest } = doc;
+  const { _id, householdId, file, reminders, ...rest } = doc;
   return {
     ...rest,
     id: _id.toString(),
@@ -108,42 +87,22 @@ function detectMimeType(buffer) {
   return null;
 }
 
-function storeFile(buffer, filename, metadata) {
-  return new Promise((resolve, reject) => {
-    const upload = bucket().openUploadStream(filename, { metadata });
-    upload.once('error', reject);
-    upload.once('finish', () => resolve(upload.id));
-    upload.end(buffer);
-  });
-}
-
 async function loadDocument(req, res) {
   if (!ObjectId.isValid(req.params.documentId)) {
-    res.status(404).json({ error: 'Document not found' });
+    res.status(404).json({ error: 'Document introuvable' });
     return null;
   }
   const doc = await getDB().collection('documents').findOne({ _id: new ObjectId(req.params.documentId), ...visibleTo(req) });
   if (!doc) {
-    res.status(404).json({ error: 'Document not found' });
+    res.status(404).json({ error: 'Document introuvable' });
     return null;
   }
   return doc;
 }
 
-function handle(fn) {
-  return async (req, res) => {
-    try {
-      await fn(req, res);
-    } catch (error) {
-      console.error(`Document route error (${req.method} ${req.originalUrl}):`, error);
-      res.status(500).json({ error: error.message });
-    }
-  };
-}
-
 // ---------- Documents ----------
 
-router.get('/:householdId', handle(async (req, res) => {
+router.get('/:householdId', handle('documents', async (req, res) => {
   const documents = await getDB().collection('documents')
     .find(visibleTo(req))
     .sort({ createdAt: -1 })
@@ -151,7 +110,7 @@ router.get('/:householdId', handle(async (req, res) => {
   res.json({ documents: documents.map(toClient) });
 }));
 
-router.post('/:householdId', handle(async (req, res) => {
+router.post('/:householdId', handle('documents', async (req, res) => {
   const { set, error } = readDocument(req.body, req.memberIds);
   if (error) return res.status(400).json({ error });
 
@@ -167,13 +126,15 @@ router.post('/:householdId', handle(async (req, res) => {
   res.status(201).json({ document: toClient(doc) });
 }));
 
-router.put('/:householdId/:documentId', handle(async (req, res) => {
+router.put('/:householdId/:documentId', handle('documents', async (req, res) => {
   const doc = await loadDocument(req, res);
   if (!doc) return;
   const { set, unset, error } = readDocument(req.body, req.memberIds);
   if (error) return res.status(400).json({ error });
   // Only its author can make a document private or shared again
   if (doc.createdBy !== req.user.uid) set.private = Boolean(doc.private);
+  // New expiry date: its reminders start over
+  if ((set.expiresAt || null) !== (doc.expiresAt || null)) unset.reminders = '';
 
   const result = await getDB().collection('documents').findOneAndUpdate(
     { _id: doc._id },
@@ -183,13 +144,13 @@ router.put('/:householdId/:documentId', handle(async (req, res) => {
   res.json({ document: toClient(result) });
 }));
 
-router.delete('/:householdId/:documentId', handle(async (req, res) => {
+router.delete('/:householdId/:documentId', handle('documents', async (req, res) => {
   const doc = await loadDocument(req, res);
   if (!doc) return;
   if (!canManage(req, doc)) return res.status(403).json({ error: NOT_ALLOWED });
   await getDB().collection('documents').deleteOne({ _id: doc._id });
   if (doc.file?.id) await deleteFile(doc.file.id);
-  res.json({ message: 'Document deleted' });
+  res.json({ message: 'Document supprimé' });
 }));
 
 // ---------- File ----------
@@ -199,7 +160,7 @@ router.delete('/:householdId/:documentId', handle(async (req, res) => {
 router.put(
   '/:householdId/:documentId/file',
   express.raw({ type: () => true, limit: MAX_FILE_BYTES }),
-  handle(async (req, res) => {
+  handle('documents', async (req, res) => {
     const doc = await loadDocument(req, res);
     if (!doc) return;
     if (doc.file && !canManage(req, doc)) return res.status(403).json({ error: NOT_ALLOWED });
@@ -209,6 +170,11 @@ router.put(
     const mimeType = detectMimeType(buffer);
     if (!mimeType) return res.status(400).json({ error: 'Seuls les PDF et les photos sont acceptés' });
 
+    const used = await householdStorage(req.householdId) - (doc.file?.size || 0);
+    if (used + buffer.length > HOUSEHOLD_QUOTA_BYTES) {
+      return res.status(413).json({ error: 'Espace de stockage du foyer plein (500 Mo) : supprime des documents pour en ajouter' });
+    }
+
     let name = 'document';
     try {
       name = text(decodeURIComponent(req.get('X-File-Name') || ''), 200) || name;
@@ -216,10 +182,10 @@ router.put(
       // Malformed name: keep the default
     }
 
-    const fileId = await storeFile(buffer, name, { householdId: req.householdId, documentId: doc._id, mimeType });
+    const { id, encrypted } = await storeFile(buffer, name, { householdId: req.householdId, documentId: doc._id, mimeType });
     const result = await getDB().collection('documents').findOneAndUpdate(
       { _id: doc._id },
-      { $set: { file: { id: fileId, name, mimeType, size: buffer.length, uploadedAt: new Date() }, updatedAt: new Date() } },
+      { $set: { file: { id, name, mimeType, size: buffer.length, uploadedAt: new Date(), encrypted }, updatedAt: new Date() } },
       { returnDocument: 'after' }
     );
     if (doc.file?.id) await deleteFile(doc.file.id);
@@ -227,29 +193,29 @@ router.put(
   })
 );
 
-router.get('/:householdId/:documentId/file', handle(async (req, res) => {
+router.get('/:householdId/:documentId/file', handle('documents', async (req, res) => {
   const doc = await loadDocument(req, res);
   if (!doc) return;
   if (!doc.file?.id) return res.status(404).json({ error: 'Ce document n’a pas de fichier' });
 
+  let content;
+  try {
+    content = await loadFile(doc.file);
+  } catch (error) {
+    console.error(`Document file ${doc.file.id} could not be read:`, error.message);
+    return res.status(404).json({ error: 'Fichier introuvable' });
+  }
+
   res.set({
     'Content-Type': doc.file.mimeType,
-    'Content-Length': doc.file.size,
+    'Content-Length': content.length,
     'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(doc.file.name)}`,
     'X-Content-Type-Options': 'nosniff',
-    'Cache-Control': 'private, no-store'
+    'Cache-Control': 'private, no-store',
+    // A PDF may embed scripts: opened directly, it runs with no rights at all
+    'Content-Security-Policy': 'sandbox'
   });
-  bucket().openDownloadStream(doc.file.id)
-    .once('error', error => {
-      console.error('Document file stream error:', error);
-      if (!res.headersSent) {
-        res.removeHeader('Content-Length');
-        res.removeHeader('Content-Disposition');
-        res.status(404).json({ error: 'Fichier introuvable' });
-      }
-      else res.destroy(error);
-    })
-    .pipe(res);
+  res.end(content);
 }));
 
 module.exports = router;

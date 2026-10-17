@@ -1,0 +1,36 @@
+# Wakes the API every morning and has it send the day's reminders (documents to renew, chores
+# due today, tomorrow's events). Needed on Render's free plan, where the server sleeps after
+# 15 minutes without traffic and its own hourly timer stops.
+#
+# Repository secrets to add (Settings > Secrets and variables > Actions):
+#   MESNIA_API_URL  e.g. https://mesnia-api.onrender.com
+#   CRON_SECRET     the value of CRON_SECRET on Render
+# Until both are set, the workflow does nothing.
+name: Daily reminders
+
+on:
+  schedule:
+    # 06:30 and 07:30 UTC: one of them is after 8:00 in Paris, summer or winter (the API only
+    # sends between 8:00 and 21:00, and never twice the same reminder)
+    - cron: '30 6 * * *'
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    env:
+      API_URL: ${{ secrets.MESNIA_API_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Send the reminders
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "MESNIA_API_URL / CRON_SECRET not configured: nothing to do"
+            exit 0
+          fi
+          # The free server may be asleep: wake it up first
+          curl --silent --show-error --retry 5 --retry-delay 20 --retry-all-errors --max-time 60 "$API_URL/health"
+          curl --fail --silent --show-error --max-time 120 -X POST \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$API_URL/api/jobs/daily"

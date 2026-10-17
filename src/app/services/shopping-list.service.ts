@@ -6,6 +6,7 @@ import { ShoppingList, ShoppingListItem, ShoppingListGroup } from '../models/sho
 import { Recipe } from '../models/recipe.model';
 import { environment } from '../../environments/environment';
 import { AuthService } from './auth.service';
+import { RealtimeService } from './realtime.service';
 
 // Interfaces pour les réponses du backend
 interface BackendShoppingList {
@@ -50,7 +51,10 @@ export class ShoppingListService {
 
   private apiUrl = `${environment.apiUrl}/shopping`;
 
-  constructor(private http: HttpClient, private authService: AuthService) {
+  constructor(private http: HttpClient, private authService: AuthService, realtime: RealtimeService) {
+    // Someone else changed the list (at the shop together...): show it right away
+    realtime.changesOf('shopping').subscribe(() => this.loadCurrentList());
+
     // Recharge la liste dès que l'utilisateur (et donc son household) change
     this.authService.currentUser$.subscribe(user => {
       if (user?.householdId) {

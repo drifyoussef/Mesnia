@@ -7,7 +7,8 @@ import {
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import { eye, eyeOff } from 'ionicons/icons';
-import { AuthService } from '../../../services/auth.service';
+import { AuthService, MIN_PASSWORD_LENGTH } from '../../../services/auth.service';
+import { environment } from '../../../../environments/environment';
 
 @Component({
   selector: 'app-register',
@@ -26,6 +27,9 @@ export class RegisterPage {
   showConfirmPassword = false;
   loading = false;
   error = '';
+  readonly minPasswordLength = MIN_PASSWORD_LENGTH;
+  readonly termsUrl = `${environment.legalUrl}/cgu`;
+  readonly privacyUrl = `${environment.legalUrl}/confidentialite`;
 
   constructor(
     private authService: AuthService,
@@ -58,8 +62,8 @@ export class RegisterPage {
       return;
     }
 
-    if (password.length < 6) {
-      this.error = 'Le mot de passe doit contenir au moins 6 caractères';
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      this.error = `Le mot de passe doit contenir au moins ${MIN_PASSWORD_LENGTH} caractères`;
       return;
     }
 
@@ -70,7 +74,6 @@ export class RegisterPage {
       this.router.navigate(['/tabs/home']);
     } catch (error: unknown) {
       this.error = error instanceof Error ? error.message : 'Erreur lors de l\'inscription';
-      console.error('Register error:', error);
     } finally {
       this.loading = false;
     }

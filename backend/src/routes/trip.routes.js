@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
 const { authenticateUser } = require('../middleware/auth.middleware');
+const { requireHouseholdMember } = require('../middleware/household.middleware');
+const { handle: handleRoute } = require('../utils/handle');
 
 // Household trips, shared by every member. One document per trip, with its packing list,
 // its day-by-day program and its expenses embedded:
@@ -22,30 +24,7 @@ const MAX_AMOUNT_CENTS = 100000000; // 1 000 000 €
 
 router.use(authenticateUser);
 
-// Only members of the household in the URL get in (same rule as shopping / calendar / schedules)
-router.use('/:householdId', async (req, res, next) => {
-  try {
-    if (!ObjectId.isValid(req.params.householdId)) {
-      return res.status(400).json({ error: 'Invalid household id' });
-    }
-
-    const householdId = new ObjectId(req.params.householdId);
-    const [user, household] = await Promise.all([
-      getDB().collection('users').findOne({ _id: new ObjectId(req.user.uid) }),
-      getDB().collection('households').findOne({ _id: householdId })
-    ]);
-    if (!user || !household || user.householdId?.toString() !== req.params.householdId) {
-      return res.status(403).json({ error: 'Access to this household is not allowed' });
-    }
-
-    req.householdId = householdId;
-    req.memberIds = (household.members || []).map(member => member.userId);
-    next();
-  } catch (error) {
-    console.error('Household authorization error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+router.use('/:householdId', requireHouseholdMember);
 
 // ---------- Helpers ----------
 
@@ -109,16 +88,7 @@ async function updateTrip(req, res, update) {
   res.json({ trip: toClient(result) });
 }
 
-function handle(fn) {
-  return async (req, res) => {
-    try {
-      await fn(req, res);
-    } catch (error) {
-      console.error(`Trip route error (${req.method} ${req.originalUrl}):`, error);
-      res.status(500).json({ error: error.message });
-    }
-  };
-}
+const handle = fn => handleRoute('trips', fn);
 
 // ---------- Trips ----------
 

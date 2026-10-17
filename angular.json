@@ -44,6 +44,13 @@
               }
             ],
             "styles": [
+              "node_modules/@fontsource/nunito/latin-400.css",
+              "node_modules/@fontsource/nunito/latin-500.css",
+              "node_modules/@fontsource/nunito/latin-600.css",
+              "node_modules/@fontsource/nunito/latin-700.css",
+              "node_modules/@fontsource/nunito/latin-800.css",
+              "node_modules/@fontsource/nunito/latin-400-italic.css",
+              "node_modules/@fontsource/nunito/latin-600-italic.css",
               "src/theme/variables.scss",
               "src/global.scss"
             ],
@@ -59,11 +66,17 @@
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "2kb",
-                  "maximumError": "4kb"
+                  "maximumWarning": "8kb",
+                  "maximumError": "16kb"
                 }
               ],
-              "outputHashing": "all"
+              "outputHashing": "all",
+              "fileReplacements": [
+                {
+                  "replace": "src/environments/environment.ts",
+                  "with": "src/environments/environment.prod.ts"
+                }
+              ]
             },
             "development": {
               "buildOptimizer": false,

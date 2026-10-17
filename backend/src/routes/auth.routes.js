@@ -6,394 +6,422 @@ const { authenticateUser } = require('../middleware/auth.middleware');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const { JWT_SECRET, JWT_OPTIONS } = require('../config/jwt');
 const { asString } = require('../utils/input');
-const { loginLimiter, registerLimiter, passwordResetLimiter } = require('../middleware/rate-limit.middleware');
+const { handle } = require('../utils/handle');
+const { checkPassword, MAX_PASSWORD_LENGTH } = require('../services/password-policy');
+const { removeMember } = require('../services/households');
+const { compressDataUri } = require('../services/recipe-import/image');
+const {
+  sendPasswordResetEmail, sendEmailVerificationEmail, sendPasswordChangedEmail, sendInBackground
+} = require('../services/email');
+const {
+  loginLimiter, registerLimiter, passwordResetLimiter, emailVerificationLimiter
+} = require('../middleware/rate-limit.middleware');
 
-const MIN_PASSWORD_LENGTH = 6;
-/** Shown to the user: the technical details stay in the server log */
-const SERVER_ERROR = 'Erreur du serveur, réessaie dans un instant';
-/** Wrong codes allowed for one reset request: then a new code must be asked for */
-const MAX_RESET_ATTEMPTS = 5;
+/** Wrong codes allowed for one code: then a new one must be asked for */
+const MAX_CODE_ATTEMPTS = 5;
+const RESET_CODE_MINUTES = 15;
+const VERIFICATION_CODE_MINUTES = 30;
+/** Reset emails one account can receive per hour, whatever the IP addresses asking */
+const MAX_RESET_EMAILS_PER_HOUR = 5;
+const BCRYPT_ROUNDS = 10;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
-const signToken = user => jwt.sign({ userId: user._id.toString(), email: user.email }, JWT_SECRET, JWT_OPTIONS);
+/** Same answer whether the account exists or not: the response must not reveal it */
+const FORGOT_PASSWORD_ANSWER = 'Si un compte existe avec cet email, un code vient d’y être envoyé';
+
+/** Compared against when the account does not exist, so a login takes as long either way */
+const DUMMY_HASH = bcrypt.hashSync('mesnia-dummy-password', BCRYPT_ROUNDS);
+
+// ---------- Helpers ----------
+
+const normalizeEmail = value => asString(value, 254).trim().toLowerCase();
+
+/** The token carries tokenVersion: incrementing it revokes every token issued before. */
+const signToken = user => jwt.sign(
+  { userId: user._id.toString(), email: user.email, v: user.tokenVersion || 0 },
+  JWT_SECRET,
+  JWT_OPTIONS
+);
+
+/** Account as sent to the app: no password hash, string ids. */
+function toClientUser(user) {
+  const { _id, password, tokenVersion, ...rest } = user;
+  return {
+    ...rest,
+    id: _id.toString(),
+    householdId: user.householdId ? user.householdId.toString() : null,
+    emailVerified: Boolean(user.emailVerified)
+  };
+}
 
 /**
- * Reset codes are stored as an HMAC, never in clear: reading the database is not enough to
- * reset an account. A plain hash would not do: a 6-digit code has only 900 000 values, all
- * hashed in a split second. Keyed with the server secret, the HMAC reveals nothing without it.
+ * One-time codes (password reset, email confirmation) are stored as an HMAC, never in clear:
+ * reading the database is not enough to use them. A plain hash would not do: a 6-digit code
+ * has only 900 000 values, all hashed in a split second. Keyed with the server secret, the
+ * HMAC reveals nothing without it.
  */
-const hashResetCode = code => crypto.createHmac('sha256', JWT_SECRET).update(`password-reset:${code}`).digest('hex');
+const hashCode = (purpose, code) => crypto.createHmac('sha256', JWT_SECRET).update(`${purpose}:${code}`).digest('hex');
 
-function resetCodeMatches(code, storedHash) {
+function codeMatches(purpose, code, storedHash) {
   if (typeof storedHash !== 'string') return false; // record from before hashing: no longer valid
   const expected = Buffer.from(storedHash, 'hex');
-  const actual = Buffer.from(hashResetCode(code), 'hex');
+  const actual = Buffer.from(hashCode(purpose, code), 'hex');
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
+/** 6 digits from a cryptographic source. Never logged: whoever reads the logs could use it. */
+const newCode = () => crypto.randomInt(100000, 1000000).toString();
 
 /** "jean.dupont@gmail.com" -> "je***@gmail.com": enough to tell requests apart in the logs */
 const maskEmail = email => email.replace(/^([^@]{1,2})[^@]*(@.*)?$/, (_, start, domain) => `${start}***${domain || ''}`);
 
-async function sendResetEmail(to, code) {
-  return transporter.sendMail({
-    from: `"Mesnia" <${process.env.GMAIL_USER}>`,
-    to,
-    subject: 'Réinitialisation de votre mot de passe Mesnia',
-    html: `
-      <div style="font-family:sans-serif;max-width:480px;margin:auto">
-        <h2>Réinitialisation du mot de passe</h2>
-        <p>Voici votre code de réinitialisation (valable 15 minutes) :</p>
-        <div style="font-size:32px;font-weight:bold;letter-spacing:8px;text-align:center;padding:20px;background:#f4f4f4;border-radius:8px;margin:20px 0">
-          ${code}
-        </div>
-        <p style="color:#888;font-size:13px">Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
-      </div>
-    `,
-  });
+const findUserById = uid => getDB().collection('users').findOne({ _id: new ObjectId(uid) });
+
+/**
+ * Consumes one attempt of a stored code, atomically: parallel requests cannot try more codes
+ * than allowed. Sends the error response itself and returns false when the code is wrong.
+ */
+async function checkStoredCode(res, collection, filter, purpose, code) {
+  const record = await getDB().collection(collection).findOneAndUpdate(
+    { ...filter, expiresAt: { $gt: new Date() } },
+    { $inc: { attempts: 1 } },
+    { returnDocument: 'after' }
+  );
+  if (!record) {
+    res.status(400).json({ error: 'Ce code a expiré ou n’existe pas : demande un nouveau code' });
+    return false;
+  }
+  if (record.attempts > MAX_CODE_ATTEMPTS) {
+    await getDB().collection(collection).deleteOne({ _id: record._id });
+    res.status(400).json({ error: 'Trop de codes incorrects : ce code est annulé, demande un nouveau code' });
+    return false;
+  }
+  if (!codeMatches(purpose, code, record.codeHash)) {
+    const left = MAX_CODE_ATTEMPTS - record.attempts;
+    if (left <= 0) {
+      await getDB().collection(collection).deleteOne({ _id: record._id });
+      res.status(400).json({ error: 'Trop de codes incorrects : ce code est annulé, demande un nouveau code' });
+    } else {
+      res.status(400).json({ error: `Code incorrect : encore ${left} essai${left > 1 ? 's' : ''}` });
+    }
+    return false;
+  }
+  // Single use
+  await getDB().collection(collection).deleteOne({ _id: record._id });
+  return true;
 }
 
-// Register new user
-router.post('/register', registerLimiter, async (req, res) => {
-  try {
-    const email = asString(req.body?.email, 254).trim();
-    const password = asString(req.body?.password, 200);
-    const displayName = asString(req.body?.displayName, 60).trim();
-    if (!email || !password || !displayName) {
-      return res.status(400).json({ error: 'Remplis ton prénom, ton email et ton mot de passe' });
-    }
-    if (password.length < MIN_PASSWORD_LENGTH) {
-      return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères' });
-    }
-    const db = getDB();
-
-    // Check if user already exists
-    const existingUser = await db.collection('users').findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Un compte existe déjà avec cet email' });
-    }
-    
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // A new user starts without a household. They create or join one
-    // explicitly afterwards (see household routes).
-    const user = {
-      email,
-      password: hashedPassword,
-      displayName,
-      householdId: null,
-      role: 'admin',
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    const result = await db.collection('users').insertOne(user);
-    user._id = result.insertedId;
-
-    const token = signToken(user);
-
-    // Remove password from response and map _id to id
-    delete user.password;
-    const userResponse = {
-      ...user,
-      id: user._id.toString(),
-      householdId: user.householdId ? user.householdId.toString() : null
-    };
-    delete userResponse._id;
-
-    res.status(201).json({ user: userResponse, token });
-  } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Login user
-router.post('/login', loginLimiter, async (req, res) => {
-  try {
-    const email = asString(req.body?.email, 254).trim();
-    const password = asString(req.body?.password, 200);
-    if (!email || !password) {
-      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
-    }
-    const db = getDB();
-
-    // Find user
-    const user = await db.collection('users').findOne({ email });
-    if (!user) {
-      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
-    }
-
-    // Check password
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
-    }
-
-    const token = signToken(user);
-    
-    // Remove password from response and map _id to id
-    delete user.password;
-    const userResponse = {
-      ...user,
-      id: user._id.toString(),
-      householdId: user.householdId ? user.householdId.toString() : null
-    };
-    delete userResponse._id;
-    
-    res.json({ user: userResponse, token });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Get user profile
-router.get('/me', authenticateUser, async (req, res) => {
-  try {
-    const db = getDB();
-    const user = await db.collection('users').findOne(
-      { _id: new ObjectId(req.user.uid) },
-      { projection: { password: 0 } }
-    );
-    
-    if (!user) {
-      return res.status(404).json({ error: 'Compte introuvable' });
-    }
-    
-    // Map _id to id
-    const userResponse = {
-      ...user,
-      id: user._id.toString(),
-      householdId: user.householdId ? user.householdId.toString() : null
-    };
-    delete userResponse._id;
-    
-    res.json({ user: userResponse });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Update user profile
-router.put('/profile', authenticateUser, async (req, res) => {
-  try {
-    const displayName = asString(req.body?.displayName, 60).trim();
-    // Inline picture (data URL), hence the large cap
-    const avatar = asString(req.body?.avatar, 1024 * 1024);
-    const db = getDB();
-    
-    const updateData = {
-      updatedAt: new Date()
-    };
-    
-    if (displayName) updateData.displayName = displayName;
-    if (avatar) updateData.avatar = avatar;
-    
-    const result = await db.collection('users').findOneAndUpdate(
-      { _id: new ObjectId(req.user.uid) },
-      { $set: updateData },
-      { returnDocument: 'after', projection: { password: 0 } }
-    );
-    
-    // Map _id to id
-    const userResponse = {
-      ...result,
-      id: result._id.toString(),
-      householdId: result.householdId ? result.householdId.toString() : null
-    };
-    delete userResponse._id;
-
-    res.json({ user: userResponse });
-  } catch (error) {
-    console.error('Update profile error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Change password
-router.post('/change-password', authenticateUser, async (req, res) => {
-  try {
-    const currentPassword = asString(req.body?.currentPassword, 200);
-    const newPassword = asString(req.body?.newPassword, 200);
-    const db = getDB();
-
-    // Validate input
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Entre ton mot de passe actuel et le nouveau' });
-    }
-
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      return res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères' });
-    }
-    
-    // Find user
-    const user = await db.collection('users').findOne({ _id: new ObjectId(req.user.uid) });
-    if (!user) {
-      return res.status(404).json({ error: 'Compte introuvable' });
-    }
-    
-    // Verify current password
-    const isValidPassword = await bcrypt.compare(currentPassword, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
-    }
-    
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    
-    // Update password
-    const result = await db.collection('users').findOneAndUpdate(
-      { _id: new ObjectId(req.user.uid) },
-      { $set: { password: hashedPassword, updatedAt: new Date() } },
-      { returnDocument: 'after', projection: { password: 0 } }
-    );
-    
-    // Map _id to id
-    const userResponse = {
-      ...result,
-      id: result._id.toString(),
-      householdId: result.householdId ? result.householdId.toString() : null
-    };
-    delete userResponse._id;
-
-    res.json({ message: 'Password changed successfully', user: userResponse });
-  } catch (error) {
-    console.error('Change password error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Request password reset
-router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
-  try {
-    const email = asString(req.body?.email, 254).trim();
-    if (!email) {
-      return res.status(400).json({ error: 'Entre ton email' });
-    }
-
-    const db = getDB();
-    const user = await db.collection('users').findOne({ email });
-    if (!user) {
-      // For security, don't reveal if email exists (to the client: the server log says it)
-      console.info(`[forgot-password] No account for ${maskEmail(email)}: no email sent`);
-      return res.status(200).json({ message: 'If the email exists, a reset code has been sent' });
-    }
-
-    // 6 digits from a cryptographic source. Never logged: whoever reads the logs could reset the account.
-    const resetCode = crypto.randomInt(100000, 1000000).toString();
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-    await db.collection('password_resets').updateOne(
-      { email },
-      {
-        $set: {
-          email,
-          codeHash: hashResetCode(resetCode),
-          attempts: 0,
-          expiresAt,
-          createdAt: new Date()
-        },
-        // Code of an earlier request, stored in clear before hashing
-        $unset: { code: '' }
-      },
-      { upsert: true }
-    );
-
-    const info = await sendResetEmail(email, resetCode);
-    console.info(`[forgot-password] Reset code emailed to ${maskEmail(email)} (accepted: ${info.accepted.length}, rejected: ${info.rejected.length}, id: ${info.messageId})`);
-
-    res.json({ message: 'Reset code sent to your email' });
-  } catch (error) {
-    console.error('[forgot-password] Error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Verify reset code and reset password
-router.post('/reset-password', passwordResetLimiter, async (req, res) => {
-  try {
-    const email = asString(req.body?.email, 254).trim();
-    const code = asString(req.body?.code, 12).trim();
-    const newPassword = asString(req.body?.newPassword, 200);
-
-    // Validate input
-    if (!email || !code || !newPassword) {
-      return res.status(400).json({ error: 'Entre le code reçu par email et ton nouveau mot de passe' });
-    }
-
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      return res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères' });
-    }
-
-    const db = getDB();
-    const resetRecord = await db.collection('password_resets').findOne({ email });
-    if (!resetRecord) {
-      return res.status(400).json({ error: 'Aucune demande en cours pour cet email : demande un nouveau code' });
-    }
-
-    if (new Date() > resetRecord.expiresAt) {
-      await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
-      return res.status(400).json({ error: 'Ce code a expiré (il est valable 15 minutes) : demande un nouveau code' });
-    }
-
-    if (!resetCodeMatches(code, resetRecord.codeHash)) {
-      // A code can only be guessed a few times: after that, a new one must be requested
-      const attempts = (resetRecord.attempts || 0) + 1;
-      if (attempts >= MAX_RESET_ATTEMPTS) {
-        await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
-        return res.status(400).json({ error: 'Trop de codes incorrects : ce code est annulé, demande un nouveau code' });
+async function sendVerificationCode(user) {
+  const code = newCode();
+  await getDB().collection('email_verifications').updateOne(
+    { userId: user._id.toString() },
+    {
+      $set: {
+        userId: user._id.toString(),
+        codeHash: hashCode('email-verification', code),
+        attempts: 0,
+        expiresAt: new Date(Date.now() + VERIFICATION_CODE_MINUTES * 60 * 1000)
       }
-      await db.collection('password_resets').updateOne({ _id: resetRecord._id }, { $set: { attempts } });
-      const left = MAX_RESET_ATTEMPTS - attempts;
-      return res.status(400).json({ error: `Code incorrect : encore ${left} essai${left > 1 ? 's' : ''}` });
-    }
+    },
+    { upsert: true }
+  );
+  sendInBackground(`verification to ${maskEmail(user.email)}`, () => sendEmailVerificationEmail(user.email, {
+    code,
+    displayName: user.displayName,
+    validMinutes: VERIFICATION_CODE_MINUTES
+  }));
+}
 
-    // Single use: consumed before the password changes
-    await db.collection('password_resets').deleteOne({ _id: resetRecord._id });
+/** New password: stored, every other session revoked, the owner warned by email. */
+async function setPassword(user, newPassword) {
+  const result = await getDB().collection('users').findOneAndUpdate(
+    { _id: user._id },
+    {
+      $set: { password: await bcrypt.hash(newPassword, BCRYPT_ROUNDS), updatedAt: new Date() },
+      $inc: { tokenVersion: 1 }
+    },
+    { returnDocument: 'after' }
+  );
+  sendInBackground(`password changed for ${maskEmail(user.email)}`, () => sendPasswordChangedEmail(user.email, {
+    displayName: user.displayName
+  }));
+  return result;
+}
 
-    const user = await db.collection('users').findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: 'Compte introuvable' });
-    }
+// ---------- Account ----------
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    // By id: the account whose reset code was checked, and no other
-    const result = await db.collection('users').findOneAndUpdate(
-      { _id: user._id },
-      { $set: { password: hashedPassword, updatedAt: new Date() } },
-      { returnDocument: 'after', projection: { password: 0 } }
-    );
-
-    if (!result) {
-      return res.status(404).json({ error: 'Impossible de changer le mot de passe, réessaie' });
-    }
-
-    // Map _id to id
-    const userResponse = {
-      ...result,
-      id: result._id.toString(),
-      householdId: result.householdId ? result.householdId.toString() : null
-    };
-    delete userResponse._id;
-
-    res.json({ message: 'Password reset successfully', user: userResponse });
-  } catch (error) {
-    console.error('[reset-password] Error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+router.post('/register', registerLimiter, handle('auth', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = asString(req.body?.password, MAX_PASSWORD_LENGTH);
+  const displayName = asString(req.body?.displayName, 60).trim();
+  if (!email || !password || !displayName) {
+    return res.status(400).json({ error: 'Remplis ton prénom, ton email et ton mot de passe' });
   }
-});
+  if (!EMAIL_PATTERN.test(email)) {
+    return res.status(400).json({ error: 'Cet email n’est pas valide' });
+  }
+  const passwordError = await checkPassword(password);
+  if (passwordError) {
+    return res.status(400).json({ error: passwordError });
+  }
+
+  const db = getDB();
+  if (await db.collection('users').findOne({ email }, { projection: { _id: 1 } })) {
+    return res.status(400).json({ error: 'Un compte existe déjà avec cet email' });
+  }
+
+  // A new user starts without a household. They create or join one
+  // explicitly afterwards (see household routes).
+  const user = {
+    email,
+    password: await bcrypt.hash(password, BCRYPT_ROUNDS),
+    displayName,
+    householdId: null,
+    emailVerified: false,
+    tokenVersion: 0,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
+
+  try {
+    user._id = (await db.collection('users').insertOne(user)).insertedId;
+  } catch (error) {
+    // Two sign-ups at the same time with the same email: the unique index keeps one
+    if (error.code === 11000) return res.status(400).json({ error: 'Un compte existe déjà avec cet email' });
+    throw error;
+  }
+
+  await sendVerificationCode(user);
+  res.status(201).json({ user: toClientUser(user), token: signToken(user) });
+}));
+
+router.post('/login', loginLimiter, handle('auth', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = asString(req.body?.password, MAX_PASSWORD_LENGTH);
+  if (!email || !password) {
+    return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+  }
+
+  const user = await getDB().collection('users').findOne({ email });
+  // bcrypt runs even without an account: the response time does not tell whether it exists
+  const isValidPassword = await bcrypt.compare(password, user?.password || DUMMY_HASH);
+  if (!user || !isValidPassword) {
+    return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+  }
+
+  res.json({ user: toClientUser(user), token: signToken(user) });
+}));
+
+router.get('/me', authenticateUser, handle('auth', async (req, res) => {
+  const user = await findUserById(req.user.uid);
+  if (!user) {
+    return res.status(404).json({ error: 'Compte introuvable' });
+  }
+  res.json({ user: toClientUser(user) });
+}));
+
+router.put('/profile', authenticateUser, handle('auth', async (req, res) => {
+  const displayName = asString(req.body?.displayName, 60).trim();
+  // Inline picture (data URL), hence the large cap
+  const avatar = asString(req.body?.avatar, 1024 * 1024);
+  const db = getDB();
+
+  const set = { updatedAt: new Date() };
+  if (displayName) set.displayName = displayName;
+  if (avatar) {
+    const compressed = /^data:image\/(png|jpe?g|webp|heic);base64,/.test(avatar) ? await compressDataUri(avatar) : undefined;
+    if (!compressed) return res.status(400).json({ error: 'Cette photo n’est pas valide' });
+    set.avatar = compressed;
+  }
+
+  const result = await db.collection('users').findOneAndUpdate(
+    { _id: new ObjectId(req.user.uid) },
+    { $set: set },
+    { returnDocument: 'after' }
+  );
+  if (!result) {
+    return res.status(404).json({ error: 'Compte introuvable' });
+  }
+
+  // Households keep a copy of each member's name
+  if (displayName) {
+    await db.collection('households').updateMany(
+      { 'members.userId': req.user.uid },
+      { $set: { 'members.$[member].displayName': displayName } },
+      { arrayFilters: [{ 'member.userId': req.user.uid }] }
+    );
+  }
+
+  res.json({ user: toClientUser(result) });
+}));
+
+/** Deletes the account and what only it owns. Recipes, events... shared with the household stay. */
+// POST, not DELETE: the password travels in the body, which some HTTP clients drop on DELETE
+router.post('/account/delete', authenticateUser, loginLimiter, handle('auth', async (req, res) => {
+  const password = asString(req.body?.password, MAX_PASSWORD_LENGTH);
+  const user = await findUserById(req.user.uid);
+  if (!user) return res.status(404).json({ error: 'Compte introuvable' });
+  if (!password || !(await bcrypt.compare(password, user.password))) {
+    return res.status(401).json({ error: 'Mot de passe incorrect' });
+  }
+
+  const db = getDB();
+  const households = await db.collection('households').find({ 'members.userId': req.user.uid }).toArray();
+  for (const household of households) {
+    await removeMember(household, req.user.uid);
+  }
+  await Promise.all([
+    db.collection('devices').deleteMany({ userId: req.user.uid }),
+    db.collection('email_verifications').deleteMany({ userId: req.user.uid }),
+    db.collection('password_resets').deleteMany({ email: user.email }),
+    db.collection('users').deleteOne({ _id: user._id })
+  ]);
+
+  console.info(`[account] Deleted the account of ${maskEmail(user.email)}`);
+  res.json({ message: 'Compte supprimé' });
+}));
+
+// ---------- Email confirmation ----------
+
+router.post('/verify-email/send', authenticateUser, emailVerificationLimiter, handle('auth', async (req, res) => {
+  const user = await findUserById(req.user.uid);
+  if (!user) return res.status(404).json({ error: 'Compte introuvable' });
+  if (user.emailVerified) return res.json({ message: 'Ton email est déjà confirmé' });
+
+  await sendVerificationCode(user);
+  res.json({ message: 'Code envoyé' });
+}));
+
+router.post('/verify-email', authenticateUser, emailVerificationLimiter, handle('auth', async (req, res) => {
+  const code = asString(req.body?.code, 12).trim();
+  if (!code) return res.status(400).json({ error: 'Entre le code reçu par email' });
+
+  const ok = await checkStoredCode(res, 'email_verifications', { userId: req.user.uid }, 'email-verification', code);
+  if (!ok) return;
+
+  const result = await getDB().collection('users').findOneAndUpdate(
+    { _id: new ObjectId(req.user.uid) },
+    { $set: { emailVerified: true, updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+  res.json({ user: toClientUser(result) });
+}));
+
+// ---------- Password ----------
+
+router.post('/change-password', authenticateUser, loginLimiter, handle('auth', async (req, res) => {
+  const currentPassword = asString(req.body?.currentPassword, MAX_PASSWORD_LENGTH);
+  const newPassword = asString(req.body?.newPassword, MAX_PASSWORD_LENGTH);
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Entre ton mot de passe actuel et le nouveau' });
+  }
+
+  const user = await findUserById(req.user.uid);
+  if (!user) {
+    return res.status(404).json({ error: 'Compte introuvable' });
+  }
+  if (!(await bcrypt.compare(currentPassword, user.password))) {
+    return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
+  }
+  const passwordError = await checkPassword(newPassword);
+  if (passwordError) {
+    return res.status(400).json({ error: passwordError });
+  }
+
+  const updated = await setPassword(user, newPassword);
+  // The other devices are logged out; this one gets a fresh token
+  res.json({ message: 'Mot de passe changé', user: toClientUser(updated), token: signToken(updated) });
+}));
+
+/** "Log out of all devices": revokes every token, this device gets a fresh one. */
+router.post('/logout-all', authenticateUser, handle('auth', async (req, res) => {
+  const updated = await getDB().collection('users').findOneAndUpdate(
+    { _id: new ObjectId(req.user.uid) },
+    { $inc: { tokenVersion: 1 }, $set: { updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+  // Notifications must stop on the devices that were logged out
+  await getDB().collection('devices').deleteMany({ userId: req.user.uid, token: { $ne: asString(req.body?.keepDeviceToken, 4096) } });
+  res.json({ token: signToken(updated) });
+}));
+
+router.post('/forgot-password', passwordResetLimiter, handle('auth', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  if (!email) {
+    return res.status(400).json({ error: 'Entre ton email' });
+  }
+
+  const db = getDB();
+  const user = await db.collection('users').findOne({ email });
+  if (!user) {
+    console.info(`[forgot-password] No account for ${maskEmail(email)}: no email sent`);
+    return res.json({ message: FORGOT_PASSWORD_ANSWER });
+  }
+
+  // Per account, on top of the per-IP limit: requests spread over many IPs gain nothing
+  const existing = await db.collection('password_resets').findOne({ email });
+  const windowStart = existing?.windowStart > new Date(Date.now() - 60 * 60 * 1000) ? existing.windowStart : new Date();
+  const sentInWindow = existing?.windowStart?.getTime() === windowStart.getTime() ? (existing.sentInWindow || 0) : 0;
+  if (sentInWindow >= MAX_RESET_EMAILS_PER_HOUR) {
+    console.info(`[forgot-password] Hourly limit reached for ${maskEmail(email)}: no email sent`);
+    return res.json({ message: FORGOT_PASSWORD_ANSWER });
+  }
+
+  const resetCode = newCode();
+  await db.collection('password_resets').updateOne(
+    { email },
+    {
+      $set: {
+        email,
+        codeHash: hashCode('password-reset', resetCode),
+        attempts: 0,
+        expiresAt: new Date(Date.now() + RESET_CODE_MINUTES * 60 * 1000),
+        windowStart,
+        sentInWindow: sentInWindow + 1,
+        createdAt: new Date()
+      },
+      // Code of an earlier request, stored in clear before hashing
+      $unset: { code: '' }
+    },
+    { upsert: true }
+  );
+
+  // Sent after answering: the response time does not reveal whether the account exists
+  sendInBackground(`reset code to ${maskEmail(email)}`, () => sendPasswordResetEmail(email, {
+    code: resetCode,
+    displayName: user.displayName,
+    validMinutes: RESET_CODE_MINUTES
+  }));
+  res.json({ message: FORGOT_PASSWORD_ANSWER });
+}));
+
+router.post('/reset-password', passwordResetLimiter, handle('auth', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const code = asString(req.body?.code, 12).trim();
+  const newPassword = asString(req.body?.newPassword, MAX_PASSWORD_LENGTH);
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'Entre le code reçu par email et ton nouveau mot de passe' });
+  }
+  const passwordError = await checkPassword(newPassword);
+  if (passwordError) {
+    return res.status(400).json({ error: passwordError });
+  }
+
+  const ok = await checkStoredCode(res, 'password_resets', { email }, 'password-reset', code);
+  if (!ok) return;
+
+  const user = await getDB().collection('users').findOne({ email });
+  if (!user) {
+    return res.status(404).json({ error: 'Compte introuvable' });
+  }
+
+  // Receiving the code proves the address belongs to them
+  await getDB().collection('users').updateOne({ _id: user._id }, { $set: { emailVerified: true } });
+  const updated = await setPassword(user, newPassword);
+  res.json({ message: 'Mot de passe réinitialisé', user: toClientUser(updated) });
+}));
 
 module.exports = router;

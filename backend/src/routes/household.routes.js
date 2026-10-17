@@ -5,8 +5,11 @@ const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
 const { authenticateUser } = require('../middleware/auth.middleware');
 const { joinHouseholdLimiter } = require('../middleware/rate-limit.middleware');
-const { deleteDocuments } = require('../services/documents');
+const { deleteHousehold, removeMember } = require('../services/households');
+const { notify } = require('../services/notify');
+const { publish } = require('../services/realtime');
 const { asString } = require('../utils/input');
+const { handle } = require('../utils/handle');
 
 // All routes require authentication
 router.use(authenticateUser);
@@ -17,9 +20,7 @@ router.use(authenticateUser);
 const INVITE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const INVITE_CODE_LENGTH = 8;
 const INVITE_CODE_LIFETIME_MS = 24 * 60 * 60 * 1000;
-
-/** Shown to the user: the technical details stay in the server log */
-const SERVER_ERROR = 'Erreur du serveur, réessaie dans un instant';
+const MAX_MEMBERS = 20;
 
 const generateInviteCode = async (db) => {
   for (;;) {
@@ -49,10 +50,14 @@ const withFreshInviteCode = async (db, household) => {
   return updated || db.collection('households').findOne({ _id: household._id });
 };
 
-// Fetch the authenticated user's document (for displayName, etc.)
-const getCurrentUser = async (db, uid) => {
-  return db.collection('users').findOne({ _id: new ObjectId(uid) });
-};
+/** Members see each other's names, not their email addresses. */
+function toClient(household) {
+  if (!household) return household;
+  return { ...household, members: household.members.map(({ email, ...member }) => member) };
+}
+
+const sendHousehold = async (res, db, household, status = 200) =>
+  res.status(status).json({ household: toClient(await withFreshInviteCode(db, household)) });
 
 // Set the user's active household
 const setUserHousehold = async (db, uid, householdId) => {
@@ -62,284 +67,232 @@ const setUserHousehold = async (db, uid, householdId) => {
   );
 };
 
+/** The household of the URL, if the user is one of its members (404 otherwise). */
+async function loadMembership(req, res) {
+  if (!ObjectId.isValid(req.params.id)) {
+    res.status(404).json({ error: 'Foyer introuvable' });
+    return null;
+  }
+  const household = await getDB().collection('households').findOne({ _id: new ObjectId(req.params.id) });
+  const member = household?.members.find(m => m.userId === req.user.uid);
+  if (!member) {
+    res.status(404).json({ error: 'Foyer introuvable' });
+    return null;
+  }
+  return { household, member };
+}
+
+async function loadAsAdmin(req, res, message) {
+  const membership = await loadMembership(req, res);
+  if (!membership) return null;
+  if (membership.member.role !== 'admin') {
+    res.status(403).json({ error: message });
+    return null;
+  }
+  return membership;
+}
+
 // Create household
-router.post('/', async (req, res) => {
-  try {
-    const name = asString(req.body?.name, 60).trim();
-    const db = getDB();
-    const currentUser = await getCurrentUser(db, req.user.uid);
-
-    const household = {
-      name,
-      createdBy: req.user.uid,
-      ...(await newInviteCode(db)),
-      members: [{
-        userId: req.user.uid,
-        email: req.user.email,
-        displayName: currentUser?.displayName || req.user.email,
-        role: 'admin',
-        joinedAt: new Date()
-      }],
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    const result = await db.collection('households').insertOne(household);
-    household._id = result.insertedId;
-
-    // The creator's active household becomes the new one
-    await setUserHousehold(db, req.user.uid, result.insertedId);
-
-    res.status(201).json({ household });
-  } catch (error) {
-    console.error('Create household error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+router.post('/', handle('households', async (req, res) => {
+  const name = asString(req.body?.name, 60).trim();
+  if (!name) {
+    return res.status(400).json({ error: 'Donne un nom à ton foyer' });
   }
-});
+  const db = getDB();
 
-// Get user's households
-router.get('/', async (req, res) => {
-  try {
-    const db = getDB();
-    const households = await db.collection('households')
-      .find({ 'members.userId': req.user.uid })
-      .toArray();
-
-    res.json({ households: await Promise.all(households.map(h => withFreshInviteCode(db, h))) });
-  } catch (error) {
-    console.error('Get households error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Get household by ID
-router.get('/:id', async (req, res) => {
-  try {
-    const db = getDB();
-    const household = await db.collection('households').findOne({
-      _id: new ObjectId(req.params.id),
-      'members.userId': req.user.uid
-    });
-
-    if (!household) {
-      return res.status(404).json({ error: 'Foyer introuvable' });
-    }
-
-    res.json({ household: await withFreshInviteCode(db, household) });
-  } catch (error) {
-    console.error('Get household error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
-  }
-});
-
-// Join household with invite code
-router.post('/join', joinHouseholdLimiter, async (req, res) => {
-  try {
-    const inviteCode = asString(req.body?.inviteCode, 32).trim().toUpperCase();
-    if (!inviteCode) {
-      return res.status(400).json({ error: 'Entre un code ami' });
-    }
-    const db = getDB();
-
-    const household = await db.collection('households').findOne({ inviteCode, inviteCodeExpiresAt: { $gt: new Date() } });
-
-    if (!household) {
-      return res.status(404).json({ error: "Ce code ami n'est pas valide. Les codes changent chaque jour : demande le code du jour à un membre du foyer" });
-    }
-
-    // Check if already a member
-    const isMember = household.members.some(m => m.userId === req.user.uid);
-    if (isMember) {
-      return res.status(400).json({ error: 'Tu fais déjà partie de ce foyer' });
-    }
-
-    const currentUser = await getCurrentUser(db, req.user.uid);
-
-    // Add member
-    const newMember = {
+  const household = {
+    name,
+    createdBy: req.user.uid,
+    ...(await newInviteCode(db)),
+    members: [{
       userId: req.user.uid,
       email: req.user.email,
-      displayName: currentUser?.displayName || req.user.email,
-      role: 'member',
+      displayName: req.currentUser.displayName || 'Membre',
+      role: 'admin',
       joinedAt: new Date()
-    };
+    }],
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
 
-    const result = await db.collection('households').findOneAndUpdate(
-      { _id: household._id },
-      {
-        $push: { members: newMember },
-        $set: { updatedAt: new Date() }
-      },
-      { returnDocument: 'after' }
-    );
+  const result = await db.collection('households').insertOne(household);
+  household._id = result.insertedId;
 
-    // Switch the user's active household to the one they just joined
-    await setUserHousehold(db, req.user.uid, household._id);
+  // The creator's active household becomes the new one
+  await setUserHousehold(db, req.user.uid, result.insertedId);
 
-    res.json({ household: result });
-  } catch (error) {
-    console.error('Join household error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+  res.status(201).json({ household: toClient(household) });
+}));
+
+// Get user's households
+router.get('/', handle('households', async (req, res) => {
+  const db = getDB();
+  const households = await db.collection('households')
+    .find({ 'members.userId': req.user.uid })
+    .toArray();
+
+  res.json({ households: (await Promise.all(households.map(h => withFreshInviteCode(db, h)))).map(toClient) });
+}));
+
+// Get household by ID
+router.get('/:id', handle('households', async (req, res) => {
+  const membership = await loadMembership(req, res);
+  if (!membership) return;
+  await sendHousehold(res, getDB(), membership.household);
+}));
+
+// Rename household (admin only)
+router.put('/:id', handle('households', async (req, res) => {
+  const membership = await loadAsAdmin(req, res, 'Seul un admin du foyer peut le renommer');
+  if (!membership) return;
+  const name = asString(req.body?.name, 60).trim();
+  if (!name) return res.status(400).json({ error: 'Donne un nom à ton foyer' });
+
+  const db = getDB();
+  const result = await db.collection('households').findOneAndUpdate(
+    { _id: membership.household._id },
+    { $set: { name, updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+  publish(result._id, 'household', req.user.uid);
+  await sendHousehold(res, db, result);
+}));
+
+// Join household with invite code
+router.post('/join', joinHouseholdLimiter, handle('households', async (req, res) => {
+  const inviteCode = asString(req.body?.inviteCode, 32).trim().toUpperCase();
+  if (!inviteCode) {
+    return res.status(400).json({ error: 'Entre un code ami' });
   }
-});
+  const db = getDB();
+
+  const household = await db.collection('households').findOne({ inviteCode, inviteCodeExpiresAt: { $gt: new Date() } });
+
+  if (!household) {
+    return res.status(404).json({ error: "Ce code ami n'est pas valide. Les codes changent chaque jour : demande le code du jour à un membre du foyer" });
+  }
+
+  if (household.members.some(m => m.userId === req.user.uid)) {
+    return res.status(400).json({ error: 'Tu fais déjà partie de ce foyer' });
+  }
+  if (household.members.length >= MAX_MEMBERS) {
+    return res.status(400).json({ error: `Ce foyer est complet (${MAX_MEMBERS} membres maximum)` });
+  }
+
+  const displayName = req.currentUser.displayName || 'Membre';
+  const result = await db.collection('households').findOneAndUpdate(
+    { _id: household._id, 'members.userId': { $ne: req.user.uid } },
+    {
+      $push: {
+        members: { userId: req.user.uid, email: req.user.email, displayName, role: 'member', joinedAt: new Date() }
+      },
+      $set: { updatedAt: new Date() }
+    },
+    { returnDocument: 'after' }
+  );
+  if (!result) {
+    return res.status(400).json({ error: 'Tu fais déjà partie de ce foyer' });
+  }
+
+  // Switch the user's active household to the one they just joined
+  await setUserHousehold(db, req.user.uid, household._id);
+
+  publish(household._id, 'household', req.user.uid);
+  void notify({
+    userIds: household.members.map(m => m.userId),
+    type: 'household',
+    title: household.name,
+    body: `${displayName} a rejoint le foyer 👋`,
+    route: '/tabs/settings/household'
+  });
+
+  res.json({ household: toClient(result) });
+}));
 
 // Regenerate invite code (admin only)
-router.post('/:id/regenerate-invite', async (req, res) => {
-  try {
-    const db = getDB();
-    const householdId = new ObjectId(req.params.id);
+router.post('/:id/regenerate-invite', handle('households', async (req, res) => {
+  const membership = await loadAsAdmin(req, res, 'Seul un admin du foyer peut générer un nouveau code');
+  if (!membership) return;
 
-    const household = await db.collection('households').findOne({ _id: householdId });
-    if (!household) {
-      return res.status(404).json({ error: 'Foyer introuvable' });
-    }
+  const db = getDB();
+  const result = await db.collection('households').findOneAndUpdate(
+    { _id: membership.household._id },
+    { $set: { ...(await newInviteCode(db)), updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+  res.json({ household: toClient(result) });
+}));
 
-    const requester = household.members.find(m => m.userId === req.user.uid);
-    if (!requester || requester.role !== 'admin') {
-      return res.status(403).json({ error: 'Seul un admin du foyer peut générer un nouveau code' });
-    }
-
-    const result = await db.collection('households').findOneAndUpdate(
-      { _id: householdId },
-      { $set: { ...(await newInviteCode(db)), updatedAt: new Date() } },
-      { returnDocument: 'after' }
-    );
-
-    res.json({ household: result });
-  } catch (error) {
-    console.error('Regenerate invite error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+// Update a member's role (admin only). The owner keeps their role, and a household keeps an admin.
+router.put('/:id/members/:userId', handle('households', async (req, res) => {
+  const { role } = req.body || {};
+  if (role !== 'admin' && role !== 'member') {
+    return res.status(400).json({ error: 'Rôle invalide' });
   }
-});
 
-// Update a member's role (admin only)
-router.put('/:id/members/:userId', async (req, res) => {
-  try {
-    const { role } = req.body;
-    if (role !== 'admin' && role !== 'member') {
-      return res.status(400).json({ error: 'Rôle invalide' });
-    }
-
-    const db = getDB();
-    const householdId = new ObjectId(req.params.id);
-
-    const household = await db.collection('households').findOne({ _id: householdId });
-    if (!household) {
-      return res.status(404).json({ error: 'Foyer introuvable' });
-    }
-
-    const requester = household.members.find(m => m.userId === req.user.uid);
-    if (!requester || requester.role !== 'admin') {
-      return res.status(403).json({ error: 'Seul un admin du foyer peut changer les rôles' });
-    }
-
-    const result = await db.collection('households').findOneAndUpdate(
-      { _id: householdId, 'members.userId': req.params.userId },
-      { $set: { 'members.$.role': role, updatedAt: new Date() } },
-      { returnDocument: 'after' }
-    );
-
-    if (!result) {
-      return res.status(404).json({ error: 'Membre introuvable' });
-    }
-
-    res.json({ household: await withFreshInviteCode(db, result) });
-  } catch (error) {
-    console.error('Update member role error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+  const membership = await loadAsAdmin(req, res, 'Seul un admin du foyer peut changer les rôles');
+  if (!membership) return;
+  const { household } = membership;
+  const target = household.members.find(m => m.userId === req.params.userId);
+  if (!target) {
+    return res.status(404).json({ error: 'Membre introuvable' });
   }
-});
-
-// Remove a member (admin only)
-router.delete('/:id/members/:userId', async (req, res) => {
-  try {
-    const db = getDB();
-    const householdId = new ObjectId(req.params.id);
-    const targetUserId = req.params.userId;
-
-    const household = await db.collection('households').findOne({ _id: householdId });
-    if (!household) {
-      return res.status(404).json({ error: 'Foyer introuvable' });
-    }
-
-    const requester = household.members.find(m => m.userId === req.user.uid);
-    if (!requester || requester.role !== 'admin') {
-      return res.status(403).json({ error: 'Seul un admin du foyer peut retirer un membre' });
-    }
-
-    if (targetUserId === req.user.uid) {
-      return res.status(400).json({ error: 'Pour partir, utilise « Quitter le foyer »' });
-    }
-
-    const result = await db.collection('households').findOneAndUpdate(
-      { _id: householdId },
-      {
-        $pull: { members: { userId: targetUserId } },
-        $set: { updatedAt: new Date() }
-      },
-      { returnDocument: 'after' }
-    );
-
-    // Clear the removed member's active household if it pointed here
-    if (ObjectId.isValid(targetUserId)) {
-      await db.collection('users').updateOne(
-        { _id: new ObjectId(targetUserId), householdId: householdId },
-        { $set: { householdId: null, updatedAt: new Date() } }
-      );
-    }
-
-    // Their private documents: nobody can open them anymore
-    await deleteDocuments({ householdId, createdBy: targetUserId, private: true });
-
-    res.json({ household: await withFreshInviteCode(db, result) });
-  } catch (error) {
-    console.error('Remove member error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+  if (target.userId === household.createdBy && role !== 'admin') {
+    return res.status(403).json({ error: 'Le créateur du foyer reste admin' });
   }
-});
 
-// Leave household
-router.delete('/:id/leave', async (req, res) => {
-  try {
-    const db = getDB();
-    const householdId = new ObjectId(req.params.id);
+  const db = getDB();
+  const result = await db.collection('households').findOneAndUpdate(
+    { _id: household._id, 'members.userId': target.userId },
+    { $set: { 'members.$.role': role, updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
 
-    const household = await db.collection('households').findOne({ _id: householdId });
+  publish(household._id, 'household', req.user.uid);
+  await sendHousehold(res, db, result);
+}));
 
-    // Only a member can leave (and thereby possibly delete) a household
-    if (!household || !household.members.some(m => m.userId === req.user.uid)) {
-      return res.status(404).json({ error: 'Foyer introuvable' });
-    }
+// Remove a member (admin only, never the owner)
+router.delete('/:id/members/:userId', handle('households', async (req, res) => {
+  const membership = await loadAsAdmin(req, res, 'Seul un admin du foyer peut retirer un membre');
+  if (!membership) return;
+  const { household } = membership;
+  const targetUserId = req.params.userId;
 
-    // If last member or creator, delete household
-    if (household.members.length === 1 || household.createdBy === req.user.uid) {
-      await db.collection('households').deleteOne({ _id: householdId });
-      // Its documents (ordonnances, papiers d'identité...) go with it
-      await deleteDocuments({ householdId });
-    } else {
-      // Remove member
-      await db.collection('households').updateOne(
-        { _id: householdId },
-        {
-          $pull: { members: { userId: req.user.uid } },
-          $set: { updatedAt: new Date() }
-        }
-      );
-      // Their private documents: nobody can open them anymore
-      await deleteDocuments({ householdId, createdBy: req.user.uid, private: true });
-    }
-
-    // Clear the user's active household if it pointed here
-    await db.collection('users').updateOne(
-      { _id: new ObjectId(req.user.uid), householdId: householdId },
-      { $set: { householdId: null, updatedAt: new Date() } }
-    );
-
-    res.json({ message: 'Left household successfully' });
-  } catch (error) {
-    console.error('Leave household error:', error);
-    res.status(500).json({ error: SERVER_ERROR });
+  if (targetUserId === req.user.uid) {
+    return res.status(400).json({ error: 'Pour partir, utilise « Quitter le foyer »' });
   }
-});
+  if (targetUserId === household.createdBy) {
+    return res.status(403).json({ error: 'Le créateur du foyer ne peut pas être retiré' });
+  }
+  if (!household.members.some(m => m.userId === targetUserId)) {
+    return res.status(404).json({ error: 'Membre introuvable' });
+  }
+
+  await removeMember(household, targetUserId);
+  const db = getDB();
+  await sendHousehold(res, db, await db.collection('households').findOne({ _id: household._id }));
+}));
+
+// Leave household. The owner leaving hands it over; the last member leaving deletes it.
+router.delete('/:id/leave', handle('households', async (req, res) => {
+  const membership = await loadMembership(req, res);
+  if (!membership) return;
+
+  const outcome = await removeMember(membership.household, req.user.uid);
+  res.json({ message: outcome === 'deleted' ? 'Foyer supprimé' : 'Tu as quitté le foyer' });
+}));
+
+// Delete household with everything in it (owner only)
+router.delete('/:id', handle('households', async (req, res) => {
+  const membership = await loadMembership(req, res);
+  if (!membership) return;
+  if (membership.household.createdBy !== req.user.uid) {
+    return res.status(403).json({ error: 'Seul le créateur du foyer peut le supprimer' });
+  }
+
+  await deleteHousehold(membership.household._id);
+  res.json({ message: 'Foyer supprimé' });
+}));
 
 module.exports = router;

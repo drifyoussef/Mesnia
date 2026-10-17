@@ -1,0 +1,45 @@
+# Render Blueprint: Dashboard > New > Blueprint > this repository.
+# Creates the API at https://mesnia-api.onrender.com (the URL the app uses in production,
+# see src/environments/environment.prod.ts). Secrets marked "sync: false" are asked for at
+# creation; "generateValue" ones are created by Render.
+services:
+  - type: web
+    name: mesnia-api
+    runtime: node
+    # Frankfurt: data stays in the European Union
+    region: frankfurt
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render puts one proxy in front of the app: the rate limits need the real client IP
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DB_NAME
+        value: Mesnia
+      - key: JWT_SECRET
+        generateValue: true
+      # ⚠️ Copy this value somewhere safe once created: without it, stored documents are lost
+      - key: DOCUMENTS_ENCRYPTION_KEY
+        generateValue: true
+      # Shared with the GitHub Actions workflow that triggers the daily reminders
+      - key: CRON_SECRET
+        generateValue: true
+      - key: MONGODB_URI
+        sync: false
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Firebase service account (JSON or base64), see PUSH-SETUP.md. Optional: no push without it
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false

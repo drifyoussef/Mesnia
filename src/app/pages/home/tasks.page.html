@@ -4,95 +4,99 @@
       <ion-back-button defaultHref="/tabs/home" text=""></ion-back-button>
     </ion-buttons>
     <ion-title class="text-2xl">Tâches</ion-title>
-    <ion-button slot="end" fill="clear" class="rounded-full" (click)="openNewTaskModal()">
+    <ion-button slot="end" fill="clear" class="rounded-full" (click)="openTaskModal()" aria-label="Ajouter une tâche">
       <ion-icon slot="icon-only" name="add" color="primary"></ion-icon>
     </ion-button>
   </ion-toolbar>
 </ion-header>
 
 <ion-content [fullscreen]="true" class="ion-padding">
-  <!-- Aujourd'hui Section -->
+  <ion-refresher slot="fixed" (ionRefresh)="refresh($event)">
+    <ion-refresher-content></ion-refresher-content>
+  </ion-refresher>
+
+  <ng-template #taskCard let-task let-completed="completed">
+    <div
+      class="task-card"
+      [class.completed]="completed"
+      [class.removing]="removingIds.has(task.id)"
+      [class.toggling]="togglingIds.has(task.id)"
+      (click)="toggleTask(task)"
+      (keyup.enter)="toggleTask(task)"
+      role="button"
+      tabindex="0"
+      [attr.aria-label]="completed ? 'Marquer comme à faire' : 'Marquer comme faite'"
+    >
+      <span class="task-dot-btn">
+        <span class="task-dot" [class.filled]="completed">
+          @if (completed) {
+            <ion-icon name="checkmark"></ion-icon>
+          }
+        </span>
+      </span>
+
+      <div class="task-info">
+        <span class="task-title">{{ task.title }}</span>
+        @if (subtitle(task)) {
+          <span class="task-assignee" [class.late]="isLate(task)">
+            @if (task.recurrence) {
+              <ion-icon name="repeat-outline"></ion-icon>
+            }
+            {{ subtitle(task) }}
+          </span>
+        }
+      </div>
+
+      <button class="task-edit-badge" (click)="editTask(task, $event)" aria-label="Modifier la tâche">
+        <ion-icon name="calendar-outline"></ion-icon>
+      </button>
+      <button class="task-delete-badge" (click)="deleteTask(task, $event)" aria-label="Supprimer la tâche">
+        <ion-icon name="close"></ion-icon>
+      </button>
+    </div>
+  </ng-template>
+
   <div class="mb-6">
-    <h2 class="text-xl mb-4">Aujourd'hui</h2>
+    <h2 class="text-xl mb-4">À faire</h2>
 
     @if (todayTasks.length > 0) {
       <div class="tasks-list">
         @for (task of todayTasks; track task.id) {
-          <div
-            class="task-card"
-            [class.removing]="removingIds.has(task.id)"
-            [class.toggling]="togglingIds.has(task.id)"
-            (click)="toggleTask(task.id)"
-            (keyup.enter)="toggleTask(task.id)"
-            role="button"
-            tabindex="0"
-            aria-label="Marquer comme terminée"
-          >
-            <span class="task-dot-btn">
-              <span class="task-dot"></span>
-            </span>
-
-            <div class="task-info">
-              <span class="task-title">{{ task.title }}</span>
-              @if (task.assignedToName) {
-                <span class="task-assignee">{{ task.assignedToName }}</span>
-              }
-            </div>
-
-            <button class="task-delete-badge" (click)="deleteTask(task.id, $event)" aria-label="Supprimer la tâche">
-              <ion-icon name="close"></ion-icon>
-            </button>
-          </div>
+          <ng-container *ngTemplateOutlet="taskCard; context: { $implicit: task, completed: false }"></ng-container>
         }
       </div>
     } @else {
       <div class="empty-state">
         <ion-icon name="checkmark-done-outline"></ion-icon>
-        <span>Aucune tâche pour aujourd'hui - Profitez-en !</span>
+        <span>Rien à faire pour l'instant : profitez-en !</span>
       </div>
     }
   </div>
 
-  <!-- Terminées Section -->
+  @if (upcomingTasks.length > 0) {
+    <div class="mb-6">
+      <h2 class="text-xl mb-4">À venir</h2>
+      <div class="tasks-list">
+        @for (task of upcomingTasks; track task.id) {
+          <ng-container *ngTemplateOutlet="taskCard; context: { $implicit: task, completed: false }"></ng-container>
+        }
+      </div>
+    </div>
+  }
+
   <div class="mb-6">
     <h2 class="text-xl mb-4">Terminées</h2>
 
     @if (completedTasks.length > 0) {
       <div class="tasks-list">
         @for (task of completedTasks; track task.id) {
-          <div
-            class="task-card completed"
-            [class.removing]="removingIds.has(task.id)"
-            [class.toggling]="togglingIds.has(task.id)"
-            (click)="toggleTask(task.id)"
-            (keyup.enter)="toggleTask(task.id)"
-            role="button"
-            tabindex="0"
-            aria-label="Marquer comme à faire"
-          >
-            <span class="task-dot-btn">
-              <span class="task-dot filled">
-                <ion-icon name="checkmark"></ion-icon>
-              </span>
-            </span>
-
-            <div class="task-info">
-              <span class="task-title">{{ task.title }}</span>
-              @if (task.assignedToName) {
-                <span class="task-assignee">{{ task.assignedToName }}</span>
-              }
-            </div>
-
-            <button class="task-delete-badge" (click)="deleteTask(task.id, $event)" aria-label="Supprimer la tâche">
-              <ion-icon name="close"></ion-icon>
-            </button>
-          </div>
+          <ng-container *ngTemplateOutlet="taskCard; context: { $implicit: task, completed: true }"></ng-container>
         }
       </div>
     } @else {
       <div class="empty-state">
         <ion-icon name="hourglass-outline"></ion-icon>
-        <span>Aucune tâche terminée</span>
+        <span>Aucune tâche terminée ces 7 derniers jours</span>
       </div>
     }
   </div>

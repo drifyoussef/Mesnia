@@ -9,7 +9,7 @@ import {
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import { eye, eyeOff, lockClosedOutline, arrowBackSharp, chevronBack } from 'ionicons/icons';
-import { AuthService } from '../../../services/auth.service';
+import { AuthService, MIN_PASSWORD_LENGTH } from '../../../services/auth.service';
 
 /**
  * The backend's own message ({ error: '...' }), which ApiService errors carry in `error.error`.
@@ -106,7 +106,6 @@ export class LoginPage {
       this.router.navigate(['/tabs/home']);
     } catch (error: unknown) {
       this.error = error instanceof Error ? error.message : 'Erreur de connexion';
-      console.error('Login error:', error);
     } finally {
       this.loading = false;
       this.cdr.detectChanges();
@@ -133,8 +132,6 @@ export class LoginPage {
       await this.authService.requestPasswordReset(this.forgotPasswordForm.email);
       this.forgotPasswordStep = 2;
     } catch (error: unknown) {
-      console.error('Request reset code error:', error);
-      // Show generic message for security
       this.forgotPasswordError = serverMessage(error) ?? 'Erreur lors de l\'envoi du code';
     } finally {
       this.forgotPasswordLoading = false;
@@ -158,8 +155,8 @@ export class LoginPage {
       return;
     }
 
-    if (this.forgotPasswordForm.newPassword.length < 6) {
-      this.forgotPasswordError = 'Le mot de passe doit contenir au moins 6 caractères';
+    if (this.forgotPasswordForm.newPassword.length < MIN_PASSWORD_LENGTH) {
+      this.forgotPasswordError = `Le mot de passe doit contenir au moins ${MIN_PASSWORD_LENGTH} caractères`;
       return;
     }
 
@@ -171,19 +168,14 @@ export class LoginPage {
     try {
       this.forgotPasswordLoading = true;
       this.forgotPasswordError = '';
-      
-      console.log('Sending password reset request...');
-      console.log('Email:', this.forgotPasswordForm.email);
-      console.log('Code:', this.forgotPasswordForm.code);
-      
-      const response = await this.authService.resetPassword(
+
+      await this.authService.resetPassword(
         this.forgotPasswordForm.email,
         this.forgotPasswordForm.code,
         this.forgotPasswordForm.newPassword
       );
-      
-      console.log('Password reset successful:', response);
-      this.forgotPasswordSuccess = 'Mot de passe réinitialisé avec succès!';
+
+      this.forgotPasswordSuccess = 'Mot de passe réinitialisé : tu peux te connecter.';
 
       // Redirect to login after 2 seconds
       setTimeout(() => {
@@ -191,13 +183,6 @@ export class LoginPage {
         this.cdr.detectChanges();
       }, 2000);
     } catch (error: unknown) {
-      console.error('Reset password error:', error);
-      console.error('Error details:', {
-        error,
-        isError: error instanceof Error,
-        message: error instanceof Error ? error.message : typeof error
-      });
-      
       this.forgotPasswordError = serverMessage(error)
         ?? (error instanceof Error ? error.message : 'Erreur lors de la réinitialisation');
     } finally {
