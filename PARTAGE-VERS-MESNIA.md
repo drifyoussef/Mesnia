@@ -15,19 +15,10 @@ Objectif : dans TikTok, Instagram, Facebook, Safari, Chrome… « Partager » �
 Il reste la partie native : faire apparaître Mesnia dans la feuille de partage et transmettre ce qui est partagé
 à `handleIncoming()`.
 
-## 1. Aligner Capacitor et créer les projets natifs
+## 1. Aligner Capacitor et créer les projets natifs ✅
 
-Aujourd'hui le CLI est en v8 mais `@capacitor/core`, `android`, `ios`, `app`… sont en v5, et les dossiers
-`android/` et `ios/` n'existent pas encore.
-
-```bash
-npm i @capacitor/core@8 @capacitor/android@8 @capacitor/ios@8 @capacitor/app@8 \
-      @capacitor/camera@8 @capacitor/haptics@8 @capacitor/keyboard@8 @capacitor/share@8 @capacitor/status-bar@8
-npx cap add android
-npx cap add ios        # sur un Mac (Xcode requis)
-```
-
-Vérifier après coup les notes de migration Capacitor 5 → 8 (versions minimales Android/iOS, Java, Xcode).
+Fait : tous les paquets `@capacitor/*` sont en v8, et les projets `android/` et `ios/` existent et sont versionnés
+(le schéma `mesnia://` y est déclaré : intent-filter Android, `CFBundleURLTypes` iOS).
 
 > Sur téléphone, `environment.apiUrl` ne peut pas être `localhost` : il faut l'IP du PC sur le réseau local
 > pendant le dev, puis l'URL du serveur en production.

@@ -49,12 +49,12 @@ npm run build
 
 ## 📱 Développement Mobile
 
-\`\`\`bash
-# Ajouter les plateformes
-npx cap add android
-npx cap add ios
+Les projets natifs `android/` et `ios/` (Capacitor 8) sont versionnés.
+Prérequis : Android Studio (JDK 21 inclus) pour Android, un Mac avec Xcode 26+ pour iOS.
 
-# Synchroniser
+\`\`\`bash
+# Copier le build web dans les projets natifs
+npm run build
 npx cap sync
 
 # Ouvrir dans l'IDE natif

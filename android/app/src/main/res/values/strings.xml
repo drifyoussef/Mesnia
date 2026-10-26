@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Mesnia</string>
+    <string name="title_activity_main">Mesnia</string>
+    <string name="package_name">app.mesnia.mobile</string>
+    <string name="custom_url_scheme">app.mesnia.mobile</string>
+</resources>

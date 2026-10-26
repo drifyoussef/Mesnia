@@ -47,9 +47,5 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# Capacitor
-/android
-/ios
-
 # Notes privées (audit) : jamais versionnées
 /AUDIT.md
