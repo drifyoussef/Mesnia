@@ -7,7 +7,7 @@ export interface ApiResponse<T> {
 export interface ApiError {
   message: string;
   code?: string;
-  details?: any;
+  details?: unknown;
 }
 
 export interface PaginatedResponse<T> {

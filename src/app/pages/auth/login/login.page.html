@@ -1,18 +1,21 @@
 <ion-header [translucent]="true" class="ion-no-border">
   <ion-toolbar>
     <ion-title>{{ showForgotPassword ? 'Réinitialiser le mot de passe' : 'Connexion' }}</ion-title>
-    <ion-buttons slot="start" *ngIf="showForgotPassword">
-      <!-- Not ion-back-button: it only shows when there is a previous page, and this form is on the same page -->
-      <ion-button fill="clear" class="toolbar-back" (click)="goBackToLogin()" aria-label="Retour à la connexion">
-        <ion-icon slot="icon-only" [name]="backIcon"></ion-icon>
-      </ion-button>
-    </ion-buttons>
+    @if (showForgotPassword) {
+      <ion-buttons slot="start">
+        <!-- Not ion-back-button: it only shows when there is a previous page, and this form is on the same page -->
+        <ion-button fill="clear" class="toolbar-back" (click)="goBackToLogin()" aria-label="Retour à la connexion">
+          <ion-icon slot="icon-only" [name]="backIcon"></ion-icon>
+        </ion-button>
+      </ion-buttons>
+    }
   </ion-toolbar>
 </ion-header>
 
 <ion-content [fullscreen]="true">
   <!-- LOGIN FORM -->
-  <div *ngIf="!showForgotPassword" class="login-container">
+  @if (!showForgotPassword) {
+  <div class="login-container">
     <div class="logo-section">
       <img class="login-logo" src="assets/brand/mesnia-logo.svg" alt="Mesnia" />
       <p>Votre foyer, enfin organisé ensemble</p>
@@ -90,9 +93,9 @@
       </div>
     </form>
   </div>
-
+  } @else {
   <!-- FORGOT PASSWORD FORM -->
-  <div *ngIf="showForgotPassword" class="login-container">
+  <div class="login-container">
     <div class="logo-section">
       <div class="reset-icon"><ion-icon name="lock-closed-outline" aria-hidden="true"></ion-icon></div>
       <p class="text-reset">Réinitialiser votre mot de passe</p>
@@ -100,7 +103,8 @@
 
     <form>
       <!-- Step 1: Email -->
-      <div *ngIf="forgotPasswordStep === 1">
+      @if (forgotPasswordStep === 1) {
+      <div>
         <div class="form-field">
           <label class="field-label" for="forgot-email">Email</label>
           <ion-input
@@ -134,9 +138,11 @@
           }
         </ion-button>
       </div>
+      }
 
       <!-- Step 2: Code + New Password -->
-      <div *ngIf="forgotPasswordStep === 2">
+      @if (forgotPasswordStep === 2) {
+      <div>
         <ion-card class="info-card">
           <ion-card-content>
             <p class="text-sm text-gray-600">
@@ -231,6 +237,8 @@
           Retour
         </ion-button>
       </div>
+      }
     </form>
   </div>
+  }
 </ion-content>

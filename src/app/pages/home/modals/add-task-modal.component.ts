@@ -32,9 +32,10 @@ import { HouseholdMember } from '../../../models/user.model';
 
     <div class="sheet-body ion-content-scroll-host">
       <div class="form-field">
-        <label class="field-label">Titre de la tâche</label>
+        <label class="field-label" for="task-title">Titre de la tâche</label>
         <ion-input
           #taskTitleInput
+          id="task-title"
           [(ngModel)]="taskTitle"
           name="taskTitle"
           placeholder="Ex: Sortir les poubelles"
@@ -43,7 +44,7 @@ import { HouseholdMember } from '../../../models/user.model';
       </div>
 
       <div class="form-field">
-        <label class="field-label">Assigner à</label>
+        <span class="field-label">Assigner à</span>
         <div class="member-picker">
           @for (member of householdMembers; track member.userId) {
             <button

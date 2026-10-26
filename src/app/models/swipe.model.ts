@@ -1,3 +1,5 @@
+import { Recipe } from './recipe.model';
+
 export interface SwipeSession {
   id: string;
   householdId: string;
@@ -18,7 +20,7 @@ export interface SwipeVote {
 }
 
 export interface SwipeCard {
-  recipe: any; // Recipe interface
+  recipe: Recipe;
   index: number;
   total: number;
 }

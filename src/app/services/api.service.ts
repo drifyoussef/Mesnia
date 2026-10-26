@@ -27,8 +27,10 @@ export class ApiService {
 
   private handleError(error: HttpErrorResponse | TimeoutError) {
     if (error instanceof TimeoutError) {
-      const timeoutError = new Error('Le serveur met du temps à répondre. Vérifie ta connexion et réessaie.') as any;
-      timeoutError.statusCode = 0;
+      const timeoutError = Object.assign(
+        new Error('Le serveur met du temps à répondre. Vérifie ta connexion et réessaie.'),
+        { statusCode: 0 }
+      );
       console.error('API Timeout:', error);
       return throwError(() => timeoutError);
     }
@@ -51,10 +53,11 @@ export class ApiService {
     console.error('API Error:', errorMessage, error);
     
     // Create error with additional context
-    const apiError = new Error(errorMessage) as any;
-    apiError.statusCode = error.status;
-    apiError.errorResponse = errorData;
-    apiError.error = error.error;
+    const apiError = Object.assign(new Error(errorMessage), {
+      statusCode: error.status,
+      errorResponse: errorData,
+      error: error.error
+    });
     
     return throwError(() => apiError);
   }
