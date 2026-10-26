@@ -231,8 +231,8 @@ export class LibraryPage implements OnInit {
   async openSwipeMode() {
     const modal = await this.modalController.create({
       component: SwipePage,
-      cssClass: 'fullscreen-modal',
-      backdropDismiss: false
+      // Fullscreen, so no backdrop to tap: backdropDismiss only lets the Android back gesture close it
+      cssClass: 'fullscreen-modal'
     });
     await modal.present();
   }

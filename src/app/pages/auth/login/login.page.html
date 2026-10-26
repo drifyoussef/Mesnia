@@ -26,6 +26,8 @@
           id="login-email"
           type="email"
           placeholder="votre@email.com"
+          enterkeyhint="next"
+          (keydown.enter)="passwordInput.setFocus()"
         ></ion-input>
       </div>
 
@@ -38,6 +40,8 @@
             [type]="showPassword ? 'text' : 'password'"
             placeholder="••••••••"
             class="has-toggle"
+            enterkeyhint="go"
+            (keydown.enter)="login(emailInput, passwordInput)"
           ></ion-input>
           <ion-icon
             [name]="showPassword ? 'eye-off' : 'eye'"

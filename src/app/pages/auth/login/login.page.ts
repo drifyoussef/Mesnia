@@ -1,11 +1,11 @@
 import { Component, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router, RouterModule } from '@angular/router';
+import { RouterModule } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import {
   IonHeader, IonToolbar, IonTitle, IonContent,
   IonInput, IonButton, IonText, IonSpinner, IonIcon,
-  IonButtons, IonCard, IonCardContent
+  IonButtons, IonCard, IonCardContent, NavController
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import { eye, eyeOff, lockClosedOutline, arrowBackSharp, chevronBack } from 'ionicons/icons';
@@ -67,7 +67,7 @@ export class LoginPage {
 
   constructor(
     private authService: AuthService,
-    private router: Router,
+    private navController: NavController,
     private cdr: ChangeDetectorRef
   ) {
     addIcons({ 'eye': eye, 'eye-off': eyeOff, 'lock-closed-outline': lockClosedOutline, 'arrow-back-sharp': arrowBackSharp, 'chevron-back': chevronBack });
@@ -91,6 +91,8 @@ export class LoginPage {
   }
 
   async login(emailInput: IonInput, passwordInput: IonInput) {
+    // The keyboard's Enter key also lands here, even while a sign-in is running
+    if (this.loading) return;
     const email = String(emailInput.value);
     const password = String(passwordInput.value);
 
@@ -103,7 +105,8 @@ export class LoginPage {
       this.loading = true;
       this.error = '';
       await this.authService.signIn(email, password);
-      this.router.navigate(['/tabs/home']);
+      // Root navigation: the back gesture must not lead back to the login screen
+      this.navController.navigateRoot('/tabs/home');
     } catch (error: unknown) {
       this.error = error instanceof Error ? error.message : 'Erreur de connexion';
     } finally {

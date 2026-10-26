@@ -1,9 +1,9 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router, RouterModule } from '@angular/router';
+import { RouterModule } from '@angular/router';
 import {
   IonHeader, IonToolbar, IonTitle, IonContent,
-  IonInput, IonButton, IonText, IonBackButton, IonButtons, IonSpinner, IonIcon
+  IonInput, IonButton, IonText, IonBackButton, IonButtons, IonSpinner, IonIcon, NavController
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import { eye, eyeOff } from 'ionicons/icons';
@@ -33,7 +33,7 @@ export class RegisterPage {
 
   constructor(
     private authService: AuthService,
-    private router: Router
+    private navController: NavController
   ) {
     addIcons({ 'eye': eye, 'eye-off': eyeOff });
   }
@@ -47,6 +47,8 @@ export class RegisterPage {
   }
 
   async register(nameInput: IonInput, emailInput: IonInput, passwordInput: IonInput, confirmPasswordInput: IonInput) {
+    // The keyboard's Enter key also lands here, even while a sign-up is running
+    if (this.loading) return;
     const displayName = String(nameInput.value);
     const email = String(emailInput.value);
     const password = String(passwordInput.value);
@@ -71,7 +73,7 @@ export class RegisterPage {
       this.loading = true;
       this.error = '';
       await this.authService.signUp(email, password, displayName);
-      this.router.navigate(['/tabs/home']);
+      this.navController.navigateRoot('/tabs/home');
     } catch (error: unknown) {
       this.error = error instanceof Error ? error.message : 'Erreur lors de l\'inscription';
     } finally {

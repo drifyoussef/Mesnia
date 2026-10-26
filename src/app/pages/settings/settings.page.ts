@@ -1,11 +1,11 @@
 import { Component, OnInit, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router, RouterLink } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import {
   IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonIcon,
   IonToggle, IonBackButton, IonButtons, IonSelect, IonSelectOption,
-  IonInput, IonSpinner, AlertController
+  IonInput, IonSpinner, AlertController, NavController
 } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import {
@@ -90,7 +90,7 @@ export class SettingsPage implements OnInit {
     private authService: AuthService,
     private toastService: ToastService,
     private alertController: AlertController,
-    private router: Router
+    private navController: NavController
   ) {
     addIcons({
       chevronForward, homeOutline, phonePortraitOutline, mailOutline, checkmarkDoneOutline,
@@ -123,7 +123,7 @@ export class SettingsPage implements OnInit {
           role: 'destructive',
           handler: async () => {
             await this.authService.signOut();
-            this.router.navigate(['/auth/login'], { replaceUrl: true });
+            this.navController.navigateRoot('/auth/login');
           }
         }
       ]

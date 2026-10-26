@@ -22,6 +22,8 @@
           id="register-name"
           type="text"
           placeholder="Votre prénom"
+          enterkeyhint="next"
+          (keydown.enter)="emailInput.setFocus()"
         ></ion-input>
       </div>
 
@@ -32,6 +34,8 @@
           id="register-email"
           type="email"
           placeholder="votre@email.com"
+          enterkeyhint="next"
+          (keydown.enter)="passwordInput.setFocus()"
         ></ion-input>
       </div>
 
@@ -44,6 +48,8 @@
             [type]="showPassword ? 'text' : 'password'"
             placeholder="••••••••"
             class="has-toggle"
+            enterkeyhint="next"
+            (keydown.enter)="confirmPasswordInput.setFocus()"
           ></ion-input>
           <ion-icon
             [name]="showPassword ? 'eye-off' : 'eye'"
@@ -63,6 +69,8 @@
             [type]="showConfirmPassword ? 'text' : 'password'"
             placeholder="••••••••"
             class="has-toggle"
+            enterkeyhint="go"
+            (keydown.enter)="register(nameInput, emailInput, passwordInput, confirmPasswordInput)"
           ></ion-input>
           <ion-icon
             [name]="showConfirmPassword ? 'eye-off' : 'eye'"

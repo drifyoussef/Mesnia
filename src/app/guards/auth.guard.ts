@@ -1,10 +1,11 @@
 import { inject } from '@angular/core';
-import { Router, CanActivateFn } from '@angular/router';
+import { CanActivateFn } from '@angular/router';
+import { NavController } from '@ionic/angular/standalone';
 import { AuthService } from '../services/auth.service';
 
 export const authGuard: CanActivateFn = async () => {
   const authService = inject(AuthService);
-  const router = inject(Router);
+  const navController = inject(NavController);
 
   // Wait for auth service to initialize
   await authService.waitForInit();
@@ -13,6 +14,6 @@ export const authGuard: CanActivateFn = async () => {
     return true;
   }
 
-  router.navigate(['/auth/login']);
+  navController.navigateRoot('/auth/login');
   return false;
 };

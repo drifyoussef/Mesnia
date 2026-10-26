@@ -1,6 +1,6 @@
 import { Component, OnInit } from '@angular/core';
 import { Router } from '@angular/router';
-import { IonContent, IonButton, IonIcon } from '@ionic/angular/standalone';
+import { IonContent, IonButton, IonIcon, NavController } from '@ionic/angular/standalone';
 import { addIcons } from 'ionicons';
 import { checkmarkDoneOutline, cartOutline, sparklesOutline, calendarOutline } from 'ionicons/icons';
 import { AuthService } from '../../services/auth.service';
@@ -15,7 +15,8 @@ import { AuthService } from '../../services/auth.service';
 export class WelcomePage implements OnInit {
   constructor(
     private authService: AuthService,
-    private router: Router
+    private router: Router,
+    private navController: NavController
   ) {
     addIcons({ checkmarkDoneOutline, cartOutline, sparklesOutline, calendarOutline });
   }
@@ -23,7 +24,7 @@ export class WelcomePage implements OnInit {
   ngOnInit() {
     // Si déjà connecté, rediriger vers l'app
     if (this.authService.isAuthenticated()) {
-      this.router.navigate(['/tabs/home']);
+      this.navController.navigateRoot('/tabs/home');
     }
   }
 
