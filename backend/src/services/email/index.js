@@ -8,6 +8,7 @@ const { LOGO_CID } = require('./layout');
 const { passwordResetEmail } = require('./password-reset');
 const { emailVerificationEmail } = require('./email-verification');
 const { passwordChangedEmail } = require('./password-changed');
+const { documentReminderEmail } = require('./document-reminder');
 
 let transporter = null;
 let customTransport = null;
@@ -54,6 +55,9 @@ const sendEmailVerificationEmail = (to, details) => send(to, emailVerificationEm
 /** @param {{ displayName?: string }} details */
 const sendPasswordChangedEmail = (to, details) => send(to, passwordChangedEmail({ ...details, email: to }));
 
+/** @param {{ displayName?: string, documents: object[] }} details */
+const sendDocumentReminderEmail = (to, details) => send(to, documentReminderEmail({ ...details, email: to }));
+
 /**
  * Sends without making the caller wait (and without revealing, by the response time, whether
  * an email was sent at all). Failures are logged.
@@ -73,6 +77,7 @@ module.exports = {
   sendPasswordResetEmail,
   sendEmailVerificationEmail,
   sendPasswordChangedEmail,
+  sendDocumentReminderEmail,
   sendInBackground,
   setTransport
 };

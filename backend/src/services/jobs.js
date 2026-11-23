@@ -3,8 +3,11 @@
 // them every hour while awake, and an external cron can call POST /api/jobs/daily (CRON_SECRET)
 // for hosts that put the server to sleep (Render free plan). Nothing is sent at night.
 
+const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
-const { notify } = require('./notify');
+const { notify, prefsOf } = require('./notify');
+const { sendDocumentReminderEmail, sendInBackground } = require('./email');
+const { dueLabel } = require('./email/document-reminder');
 const { todayIso, addDays, daysBetween, TIME_ZONE } = require('../utils/dates');
 
 const SEND_FROM_HOUR = 8;
@@ -23,12 +26,12 @@ function parisHour(date = new Date()) {
   return Number(new Intl.DateTimeFormat('en-GB', { timeZone: TIME_ZONE, hour: '2-digit', hour12: false }).format(date));
 }
 
-/** "expire dans 30 jours" / "expire demain" / "expire aujourd'hui" / "a expiré" */
-function dueLabel(daysLeft) {
-  if (daysLeft < 0) return 'a expiré';
-  if (daysLeft === 0) return 'expire aujourd’hui';
-  if (daysLeft === 1) return 'expire demain';
-  return `expire dans ${daysLeft} jours`;
+async function loadUsers(ids) {
+  const valid = [...new Set(ids)].filter(id => ObjectId.isValid(id));
+  const users = await getDB().collection('users')
+    .find({ _id: { $in: valid.map(id => new ObjectId(id)) } }, { projection: { email: 1, displayName: 1, emailVerified: 1, notificationPrefs: 1 } })
+    .toArray();
+  return new Map(users.map(user => [user._id.toString(), user]));
 }
 
 /** Who must hear about a document: its author when private, else the member it concerns, else everyone. */
@@ -63,6 +66,7 @@ async function sendDocumentReminders(today = todayIso()) {
     }
   }
 
+  const users = await loadUsers([...perUser.keys()]);
   for (const [userId, documents] of perUser) {
     documents.sort((a, b) => a.daysLeft - b.daysLeft);
     const single = documents.length === 1;
@@ -75,6 +79,16 @@ async function sendDocumentReminders(today = todayIso()) {
         : `${documents.length} documents arrivent à expiration`,
       route: '/tabs/documents'
     });
+
+    const user = users.get(userId);
+    const prefs = prefsOf(user);
+    // Only to a confirmed address: never remind a stranger whose email was typed by mistake
+    if (user?.emailVerified && prefs.email && prefs.documents) {
+      sendInBackground(`document reminder to user ${userId}`, () => sendDocumentReminderEmail(user.email, {
+        displayName: user.displayName,
+        documents
+      }));
+    }
   }
   return flagged;
 }
