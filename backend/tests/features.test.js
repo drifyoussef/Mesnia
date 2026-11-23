@@ -1,5 +1,5 @@
 const { ObjectId } = require('mongodb');
-const { useTestApp, registerUser, createHousehold, registerDevice, waitForEmail, codeIn, settle, sentPushes, sentEmails, getDB } = require('./helpers');
+const { useTestApp, registerUser, createHousehold, registerDevice, settle, sentPushes, sentEmails, getDB } = require('./helpers');
 const { runDailyJobs } = require('../src/services/jobs');
 const { todayIso, addDays } = require('../src/utils/dates');
 
@@ -148,12 +148,7 @@ describe('Shared features', () => {
       expect(res.status).toBe(400);
     });
 
-    test('expiry reminders: push to the member, email to a confirmed address, sent once', async () => {
-      // Bob confirms his address
-      await bob.api.post('/api/auth/verify-email/send');
-      const email = await waitForEmail(m => m.to === bob.email && /Confirmez/.test(m.subject));
-      await bob.api.post('/api/auth/verify-email', { code: codeIn(email) });
-
+    test('expiry reminders: push to the member, no email, sent once', async () => {
       await alice.api.post(`/api/documents/${householdId}`, {
         title: 'Carte d’identité de Bob', category: 'identite', memberId: bob.user.id, expiresAt: addDays(todayIso(), 6)
       });
@@ -163,9 +158,8 @@ describe('Shared features', () => {
       const first = await runDailyJobs({ force: true });
       expect(first.documents).toBe(1);
       await settle();
-      expect(sentPushes).toEqual([expect.objectContaining({ tokens: ['token-bob'], title: 'Document à renouveler' })]);
-      const reminder = await waitForEmail(m => m.to === bob.email);
-      expect(reminder.subject).toContain('expire dans 6 jours');
+      expect(sentPushes).toEqual([expect.objectContaining({ tokens: ['token-bob'], title: 'Document à renouveler', body: expect.stringContaining('expire dans 6 jours') })]);
+      expect(sentEmails).toHaveLength(0);
 
       const second = await runDailyJobs({ force: true });
       expect(second.documents).toBe(0);
